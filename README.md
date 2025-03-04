@@ -1,3 +1,20 @@
+# Compliance Guardian Models Fork of Unsloth
+
+## Getting started
+1. Setup environment:
+   ```
+   conda create -n unsloth python=3.12 -y
+   conda activate unsloth
+   pip install -r requirements.txt
+   ```
+
+2. Run GRPO training:
+   ```
+   python main.py
+   ```
+
+
+
 <div align="center">
 
   <a href="https://unsloth.ai"><picture>

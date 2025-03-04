@@ -38,8 +38,9 @@ from transformers.utils import strtobool
 from trl import SFTTrainer, GRPOConfig, GRPOTrainer
 from transformers import TrainingArguments
 from unsloth import is_bfloat16_supported
+
 import logging
-logging.getLogger('hf-to-gguf').setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 ##############
 # GRPO stuff
@@ -132,33 +133,37 @@ def xmlcount_reward_func(completions, **kwargs) -> list[float]:
     return [count_xml(c) for c in contents]
 
 def get_grpo_trainer(model, tokenizer):
+    logger.debug(f"Getting GRPO model thing...")
     PatchFastRL("GRPO", FastLanguageModel)
+    
+    logger.debug(f"Loading gsm8k dataset...")
     dataset = get_gsm8k_questions()
+
+    logger.debug(f"Setting up GRPO trainer...")
     training_args = GRPOConfig(
-        use_vllm = True, # use vLLM for fast inference!
-        learning_rate = 5e-6,
-        adam_beta1 = 0.9,
-        adam_beta2 = 0.99,
-        weight_decay = 0.1,
-        warmup_ratio = 0.1,
-        lr_scheduler_type = "cosine",
-        optim = "paged_adamw_8bit",
-        logging_steps = 1,
+        use_vllm = args.use_vllm, # use vLLM for fast inference!
+        learning_rate = args.learning_rate,
+        adam_beta1 = args.adam_beta1,
+        adam_beta2 = args.adam_beta2,
+        weight_decay = args.weight_decay,
+        warmup_ratio = args.warmup_ratio,
+        lr_scheduler_type = args.lr_scheduler_type,
+        optim = args.optim,
+        logging_steps = args.logging_steps,
         bf16 = is_bfloat16_supported(),
         fp16 = not is_bfloat16_supported(),
-        per_device_train_batch_size = 1,
-        gradient_accumulation_steps = 1, # Increase to 4 for smoother training
-        num_generations = 6, # Decrease if out of memory
-        max_prompt_length = 256,
-        max_completion_length = 200,
-        # num_train_epochs = 1, # Set to 1 for a full training run
-        max_steps = 250,
-        save_steps = 250,
-        max_grad_norm = 0.1,
-        report_to = "none", # Can use Weights & Biases
-        output_dir = "outputs",
+        per_device_train_batch_size = args.per_device_train_batch_size,
+        gradient_accumulation_steps = args.gradient_accumulation_steps, # Increase to 4 for smoother training
+        num_generations = args.num_generations, # Decrease if out of memory
+        max_prompt_length = args.max_prompt_length,
+        max_completion_length = args.max_completion_length,
+        num_train_epochs = args.num_train_epochs, # Only used if max_steps = -1
+        max_steps = args.max_steps,
+        save_steps = args.save_steps,
+        max_grad_norm = args.max_grad_norm,
+        report_to = args.report_to, # Can use Weights & Biases
+        output_dir = args.output_dir,
     )
-
     trainer = GRPOTrainer(
         model = model,
         processing_class = tokenizer,
@@ -174,9 +179,17 @@ def get_grpo_trainer(model, tokenizer):
     )
     return trainer
 
-
+def configure_logging(log_level):
+    # Determine log level: CLI argument > Environment variable > Default (INFO)
+    log_level = (log_level or os.getenv("LOG_LEVEL", "INFO")).upper()
+    logging.basicConfig(
+        level=log_level,
+        format="{name}:{levelname}: {message}",
+        style="{"
+    )
 
 def run(args):
+    logger.debug(f"Loading model...")
     # Load model and tokenizer
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.model_name,
@@ -184,29 +197,40 @@ def run(args):
         dtype=args.dtype,
         load_in_4bit=args.load_in_4bit,
     )
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=args.model_name,
+        max_seq_length=args.max_seq_length,
+        oad_in_4bit=args.load_in_4bit, # False for LoRA 16bit
+        fast_inference=args.use_vllm, # Enable vLLM fast inference
+        max_lora_rank=args.lora_rank,
+        gpu_memory_utilization = args.gpu_memory_utilization, # Reduce if out of memory
+    )
 
+    logger.debug(f"Turning model into PEFT...")
     # Configure PEFT model
     model = FastLanguageModel.get_peft_model(
         model,
-        r=args.r,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj"],
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        bias=args.bias,
-        use_gradient_checkpointing=args.use_gradient_checkpointing,
-        random_state=args.random_state,
-        use_rslora=args.use_rslora,
-        loftq_config=args.loftq_config,
+        r = args.lora_rank, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
+        target_modules = [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ], # Remove QKVO if out of memory
+        lora_alpha = args.lora_alpha,
+        use_gradient_checkpointing = args.use_gradient_checkpointing, # Enable long context finetuning
+        random_state = args.seed,
     )
 
+    logger.debug(f"Getting GRPO trainer...")
     trainer = get_grpo_trainer(model, tokenizer)
 
     # Train model
+    logger.debug(f"Training model...")
     trainer_stats = trainer.train()
+    logger.debug(f"Training complete")
 
     # Save model
     if args.save_model:
+        logger.debug(f"Saving model...")
         # if args.quantization_method is a list, we will save the model for each quantization method
         if args.save_gguf:
             if isinstance(args.quantization, list):
@@ -240,22 +264,21 @@ def run(args):
         print("Warning: The model is not saved!")
 
 
-if __name__ == "__main__":
-
+def parse_args():
     # Define argument parser
     parser = argparse.ArgumentParser(description="🦥 Fine-tune your llm faster using unsloth!")
 
     model_group = parser.add_argument_group("🤖 Model Options")
     model_group.add_argument('--model_name', type=str, default="meta-llama/meta-Llama-3.1-8B-Instruct", help="Model name to load")
     # model_group.add_argument('--model_name', type=str, default="unsloth/llama-3-8b", help="Model name to load")
-    model_group.add_argument('--max_seq_length', type=int, default=2048, help="Maximum sequence length, default is 2048. We auto support RoPE Scaling internally!")
+    model_group.add_argument('--max_seq_length', type=int, default=512, help="Maximum sequence length, default is 512. We auto support RoPE Scaling internally!")
     model_group.add_argument('--dtype', type=str, default=None, help="Data type for model (None for auto detection)")
-    model_group.add_argument('--load_in_4bit', action='store_true', help="Use 4bit quantization to reduce memory usage")
+    model_group.add_argument('--load_in_4bit', action=argparse.BooleanOptionalAction, default=True, help="Use 4bit quantization to reduce memory usage")
     model_group.add_argument('--dataset', type=str, default="yahma/alpaca-cleaned", help="Huggingface dataset to use for training")
 
     lora_group = parser.add_argument_group("🧠 LoRA Options", "These options are used to configure the LoRA model.")
-    lora_group.add_argument('--r', type=int, default=16, help="Rank for Lora model, default is 16.  (common values: 8, 16, 32, 64, 128)")
-    lora_group.add_argument('--lora_alpha', type=int, default=16, help="LoRA alpha parameter, default is 16. (common values: 8, 16, 32, 64, 128)")
+    lora_group.add_argument('--lora_rank', type=int, default=32, help="Rank for Lora model, default is 32.  (common values: 8, 16, 32, 64, 128)")
+    lora_group.add_argument('--lora_alpha', type=int, default=32, help="LoRA alpha parameter, default is 32. (common values: 8, 16, 32, 64, 128)")
     lora_group.add_argument('--lora_dropout', type=float, default=0, help="LoRA dropout rate, default is 0.0 which is optimized.")
     lora_group.add_argument('--bias', type=str, default="none", help="Bias setting for LoRA")
     lora_group.add_argument('--use_gradient_checkpointing', type=str, default="unsloth", help="Use gradient checkpointing")
@@ -263,25 +286,39 @@ if __name__ == "__main__":
     lora_group.add_argument('--use_rslora', action='store_true', help="Use rank stabilized LoRA")
     lora_group.add_argument('--loftq_config', type=str, default=None, help="Configuration for LoftQ")
 
-   
     training_group = parser.add_argument_group("🎓 Training Options")
-    training_group.add_argument('--per_device_train_batch_size', type=int, default=2, help="Batch size per device during training, default is 2.")
-    training_group.add_argument('--gradient_accumulation_steps', type=int, default=4, help="Number of gradient accumulation steps, default is 4.")
-    training_group.add_argument('--warmup_steps', type=int, default=5, help="Number of warmup steps, default is 5.")
-    training_group.add_argument('--max_steps', type=int, default=400, help="Maximum number of training steps.")
+    training_group.add_argument('--per_device_train_batch_size', type=int, default=1, help="Batch size per device during training, default is 1.")
+    training_group.add_argument('--gradient_accumulation_steps', type=int, default=1, help="Number of gradient accumulation steps, default is 1. Increase to 4 for smoother training.")
+    training_group.add_argument('--warmup_steps', type=int, default=5, help="Number of warmup steps, default is 5, not used if warmup_ratio is set.")
+    training_group.add_argument('--max_steps', type=int, default=5, help="Maximum number of training steps.")
+    training_group.add_argument('--save_steps', type=int, default=250, help="Save steps, default is 250.")
+    training_group.add_argument('--num_train_epochs', type=int, default=1, help="Number of training epochs, only used if max_steps = -1.")
     training_group.add_argument('--learning_rate', type=float, default=2e-4, help="Learning rate, default is 2e-4.")
-    training_group.add_argument('--optim', type=str, default="adamw_8bit", help="Optimizer type.")
-    training_group.add_argument('--weight_decay', type=float, default=0.01, help="Weight decay, default is 0.01.")
-    training_group.add_argument('--lr_scheduler_type', type=str, default="linear", help="Learning rate scheduler type, default is 'linear'.")
+    training_group.add_argument('--optim', type=str, default="paged_adamw_8bit", help="Optimizer type.")
+    training_group.add_argument('--adam_beta1', type=float, default=0.9, help="Adam beta1, default is 0.9.")
+    training_group.add_argument('--adam_beta2', type=float, default=0.99, help="Adam beta2, default is 0.99.")
+    training_group.add_argument('--weight_decay', type=float, default=0.1, help="Weight decay, default is 0.1.")
+    training_group.add_argument('--warmup_ratio', type=float, default=0.1, help="Warmup ratio, default is 0.1.")
+    training_group.add_argument('--lr_scheduler_type', type=str, default="cosine", help="Learning rate scheduler type, default is 'cosine'.")
+    training_group.add_argument('--num_generations', type=int, default=6, help="Number of GRPO rollouts, default is 6. Decrease if out of memory.")
+    training_group.add_argument('--max_prompt_length', type=int, default=256, help="Maximum prompt length, default is 256.")
+    training_group.add_argument('--max_completion_length', type=int, default=200, help="Maximum completion length, default is 200.")
+    training_group.add_argument('--max_grad_norm', type=float, default=0.1, help="Maximum gradient norm, default is 0.1.")
+    training_group.add_argument('--report_to', type=str, default="none", help="Report to platform like weights and bias, default is 'none'.")
+    training_group.add_argument('--output_dir', type=str, default="outputs", help="Output directory.")
+    training_group.add_argument('--gpu_memory_utilization', type=float, default=0.6, help="GPU memory utilization, default is 0.6. Reduce if out of memory.")
+    training_group.add_argument('--use_gradient_checkpointing', type=str, default="unsloth", help="Use gradient checkpointing. Default is 'unsloth'.")
     training_group.add_argument('--seed', type=int, default=3407, help="Seed for reproducibility, default is 3407.")
     
-
     # Report/Logging arguments
     report_group = parser.add_argument_group("📊 Report Options")
     report_group.add_argument('--report_to', type=str, default="tensorboard",
         choices=["azure_ml", "clearml", "codecarbon", "comet_ml", "dagshub", "dvclive", "flyte", "mlflow", "neptune", "tensorboard", "wandb", "all", "none"],
         help="The list of integrations to report the results and logs to. Supported platforms are: \n\t\t 'azure_ml', 'clearml', 'codecarbon', 'comet_ml', 'dagshub', 'dvclive', 'flyte', 'mlflow', 'neptune', 'tensorboard', and 'wandb'. Use 'all' to report to all integrations installed, 'none' for no integrations.")
     report_group.add_argument('--logging_steps', type=int, default=1, help="Logging steps, default is 1")
+    report_group.add_argument('--log_level', type=str, 
+        choices=['debug', 'info', 'warning', 'error', 'critical', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], 
+        help="Explicitly set logging level to override environment variable. Defaults to WARNING. Options: DEBUG, INFO, WARNING, ERROR, CRITICAL")
 
     # Saving and pushing arguments
     save_group = parser.add_argument_group('💾 Save Model Options')
@@ -299,5 +336,10 @@ if __name__ == "__main__":
     push_group.add_argument('--hub_path', type=str, default="hf/model", help="Path on Hugging Face hub to push the model")
     push_group.add_argument('--hub_token', type=str, help="Token for pushing the model to Hugging Face hub")
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    configure_logging(args.log_level)
     run(args)
