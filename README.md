@@ -8,11 +8,29 @@
    pip install -r requirements.txt
    ```
 
-2. Run GRPO training:
+2. Confirm installation:
+   ```
+   gpu 1 1 rtxa4000
+   python example_grpo_gsm8k.py
+   ```
+   You should get the following output:
+   ```
+   🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.
+   🦥 Unsloth Zoo will now patch everything to make training faster!
+   __main__:INFO: Loading model...
+   ...
+   __main__:INFO: Training model...
+   ...
+   __main__:INFO: Training complete
+   __main__:INFO: Saving model...
+   ...
+   [rank0]:[W305 11:48:31.171114528 ProcessGroupNCCL.cpp:1250] Warning: WARNING: process group has NOT been destroyed[rank0]:[W305 11:48:31.171114528 ProcessGroupNCCL.cpp:1250] Warning: WARNING: process group has NOT been destroyed
+   ```
+
+3. Run GRPO on compliance dataset:
    ```
    python main.py
    ```
-
 
 
 <div align="center">

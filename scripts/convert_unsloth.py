@@ -3,6 +3,13 @@ import ast
 import datasets
 
 
+# These constants should match the constants at the top of main.py
+# TODO: Move these constants to a shared file
+INPUT_FIELD = "input"
+OUTPUT_FIELD = "output"
+LABEL_DELIMITER = "\nCOMPLIANCE OUTPUT:"
+
+
 def clean_rule(rule):
     # Looking for 1. or 2. etc.
     splits = rule.split(". ", 1)
@@ -66,7 +73,7 @@ def preprocess_dataset(dataset_path, subset=None, split=None, size=None, local=F
                 except Exception as e:
                     print(f"BAD RULE: {rule}")
                     raise e
-                example['input'] = f'''
+                example[INPUT_FIELD] = f'''
 Rule Agent must follow:
 {rule}
 
@@ -95,7 +102,7 @@ Conversation:
                     raise e
                 
                 label = parse_string_list(labels[i])[j]
-                example['output'] = f"{discussion} {explanation} Compliance output: {label}"
+                example[OUTPUT_FIELD] = f"{discussion} {explanation} {LABEL_DELIMITER} {label}"
                 examples.append(example)
 
 

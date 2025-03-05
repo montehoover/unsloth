@@ -8,24 +8,9 @@ from unsloth import is_bfloat16_supported
 import re
 from vllm import SamplingParams
 
-
 import logging
 logger = logging.getLogger(__name__)
 
-# These constants should match the constants at the top of scripts/convert_unsloth.py
-# TODO: Move these constants to a shared file
-INPUT_FIELD = "input"
-OUTPUT_FIELD = "output"
-LABEL_DELIMITER = "\nCOMPLIANCE OUTPUT:"
-
-XML_COT_FORMAT = """\
-    <reasoning>
-    {reasoning}
-    </reasoning>
-    <answer>
-    {answer}
-    </answer>
-    """
 
 SYSTEM_PROMPT = """
     Respond in the following format:
@@ -37,6 +22,14 @@ SYSTEM_PROMPT = """
     </answer>
     """
 
+XML_COT_FORMAT = """\
+    <reasoning>
+    {reasoning}
+    </reasoning>
+    <answer>
+    {answer}
+    </answer>
+    """
 
 ####################
 # Reward functions
@@ -56,11 +49,13 @@ def correctness_reward_func(prompts, completions, answer, **kwargs) -> list[floa
     print('-'*20, f"Question:\n{q}", f"\nAnswer:\n{answer[0]}", f"\nResponse:\n{responses[0]}", f"\nExtracted:\n{extracted_responses[0]}")
     return [2.0 if r == a else 0.0 for r, a in zip(extracted_responses, answer)]
 
-def label_reward_func(completions, **kwargs) -> list[float]:
+
+def int_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the label is exactly PASS or FAIL."""
     responses = [completion[0]['content'] for completion in completions]
     extracted_responses = [extract_xml_answer(r) for r in responses]
-    return [0.5 if r in ["PASS", "FAIL"] else 0.0 for r in extracted_responses]
+    return [0.5 if r.isdigit() else 0.0 for r in extracted_responses]
+
 
 def strict_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion is in XML_COT_FORMAT, strictly adhering to newlines."""
@@ -69,12 +64,14 @@ def strict_format_reward_func(completions, **kwargs) -> list[float]:
     matches = [re.match(pattern, r) for r in responses]
     return [0.5 if match else 0.0 for match in matches]
 
+
 def soft_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion is in XML_COT_FORMAT, with flexibility in newlines."""
     pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
     responses = [completion[0]["content"] for completion in completions]
     matches = [re.match(pattern, r) for r in responses]
     return [0.5 if match else 0.0 for match in matches]
+
 
 def count_xml(text) -> float:
     """Add rewards for each xml tag that is present, and penalize any characters that exist after </answer>. (Also ends up being a length penalty if </answer> is missing.)"""
@@ -91,6 +88,7 @@ def count_xml(text) -> float:
         count -= (len(text.split("\n</answer>")[-1]) - 1)*0.001
     return count
 
+
 def xmlcount_reward_func(completions, **kwargs) -> list[float]:
     contents = [completion[0]["content"] for completion in completions]
     return [count_xml(c) for c in contents]
@@ -104,24 +102,26 @@ def extract_xml_answer(text: str) -> str:
     answer = answer.split("</answer>")[0]
     return answer.strip()
 
-def extract_label(text: str) -> str | None:
+
+def extract_hash_answer(text: str) -> str | None:
     if "####" not in text:
         return None
     return text.split("####")[1].strip()
 
 
-#TODO:  Fix the format so this and script/convert_torchtune.py match properly
-def get_compliance_examples(split = "train") -> Dataset:
-    data = load_dataset('json', data_files="data/easy_train_7500.jsonl")['train']
+# uncomment middle messages for 1-shot prompting
+def get_gsm8k_questions(split = "train") -> Dataset:
+    data = load_dataset('openai/gsm8k', 'main')[split] # type: ignore
+    logger.info(data[0])
     data = data.map(lambda x: { # type: ignore
         'prompt': [
             {'role': 'system', 'content': SYSTEM_PROMPT},
-            {'role': 'user', 'content': x[INPUT_FIELD]}
+            {'role': 'user', 'content': x['question']}
         ],
-        OUTPUT_FIELD: extract_label(x[OUTPUT_FIELD])
+        'answer': extract_hash_answer(x['answer'])
     }) # type: ignore
+    logger.info(data[0])
     return data # type: ignore
-
 
 
 def get_grpo_trainer(args, model, tokenizer):
@@ -129,7 +129,7 @@ def get_grpo_trainer(args, model, tokenizer):
     PatchFastRL("GRPO", FastLanguageModel)
     
     logger.info(f"Loading gsm8k dataset...")
-    dataset = get_compliance_examples()
+    dataset = get_gsm8k_questions()
 
     logger.info(f"Setting up GRPO trainer...")
     training_args = GRPOConfig(
@@ -171,6 +171,7 @@ def get_grpo_trainer(args, model, tokenizer):
     )
     return trainer
 
+
 def configure_logging(log_level):
     # Determine log level: CLI argument > Environment variable > Default (INFO)
     log_level = (log_level or os.getenv("LOG_LEVEL", "INFO")).upper()
@@ -179,6 +180,7 @@ def configure_logging(log_level):
         format="{name}:{levelname}: {message}",
         style="{"
     )
+
 
 def run(args):
     logger.info(f"Loading model...")
@@ -280,7 +282,7 @@ Before training:
 #################
                     
 {output}""")
-        
+
         # After training, with the LoRA adaptor
         model.save_lora("outputs/grpo_saved_lora")
         output = model.fast_generate(
@@ -294,7 +296,7 @@ After training:
 #################
                     
 {output}""")
-        
+
         # Also test huggingface style generation
         # model.save_pretrained_merged(args.save_path, tokenizer, args.save_method)
         # model = AutoModelForCausalLM.from_pretrained(args.save_path, device_map="auto").eval()
@@ -315,7 +317,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="🦥 Fine-tune your llm faster using unsloth!")
 
     model_group = parser.add_argument_group("🤖 Model Options")
-    model_group.add_argument('--model_name', type=str, default="meta-llama/meta-Llama-3.1-8B-Instruct", help="Model name to load")
+    model_group.add_argument('--model_name', type=str, default="meta-llama/Llama-3.2-1B-Instruct", help="Model name to load")
     model_group.add_argument('--max_seq_length', type=int, default=512, help="Maximum sequence length, default is 512. We auto support RoPE Scaling internally!")
     model_group.add_argument('--dtype', type=str, default=None, help="Data type for model (None for auto detection)")
     model_group.add_argument('--load_in_4bit', action=argparse.BooleanOptionalAction, default=True, help="Use 4bit quantization to reduce memory usage")
@@ -336,7 +338,7 @@ def parse_args():
     training_group.add_argument('--per_device_train_batch_size', type=int, default=1, help="Batch size per device during training, default is 1.")
     training_group.add_argument('--gradient_accumulation_steps', type=int, default=1, help="Number of gradient accumulation steps, default is 1. Increase to 4 for smoother training.")
     training_group.add_argument('--warmup_steps', type=int, default=5, help="Number of warmup steps, default is 5, not used if warmup_ratio is set.")
-    training_group.add_argument('--max_steps', type=int, default=1, help="Maximum number of training steps.")
+    training_group.add_argument('--max_steps', type=int, default=3, help="Maximum number of training steps.")
     training_group.add_argument('--save_steps', type=int, default=250, help="Save steps, default is 250.")
     training_group.add_argument('--num_train_epochs', type=int, default=1, help="Number of training epochs, only used if max_steps = -1.")
     training_group.add_argument('--learning_rate', type=float, default=2e-4, help="Learning rate, default is 2e-4.")
@@ -366,7 +368,7 @@ def parse_args():
     # Saving and pushing arguments
     save_group = parser.add_argument_group('💾 Save Model Options')
     save_group.add_argument('--output_dir', type=str, default="outputs", help="Output directory")
-    save_group.add_argument('--save_model', action='store_true', help="Save the model after training")
+    save_group.add_argument('--save_model', action=argparse.BooleanOptionalAction, default=True, help="Save the model after training")
     save_group.add_argument('--save_method', type=str, default="merged_16bit", choices=["merged_16bit", "merged_4bit", "lora"], help="Save method for the model, default is 'merged_16bit'")
     save_group.add_argument('--save_gguf', action='store_true', help="Convert the model to GGUF after training")
     save_group.add_argument('--save_path', type=str, default="model", help="Path to save the model")
