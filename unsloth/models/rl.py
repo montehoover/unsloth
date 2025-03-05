@@ -60,7 +60,7 @@ def PatchRL(FastLanguageModel):
     def unsloth_unwrap_model_for_generation(model, *args, **kwargs):
         with unwrap_model_for_generation(model, *args, **kwargs) as unwrapped_model:
             # Put the model in inference mode.
-            FastLanguageModel.for_inference(unwrapped_model)
+            FastLanguageModel.for_inference(model)
 
             # We must use .clone for Unsloth since we force inference_mode
             # Rather we should have used no_grad
@@ -495,7 +495,7 @@ def _patch_trl_rl_trainers(trainer_file = "grpo_trainer"):
         RLTrainer_source,
         f"trl.trainer.{trainer_file}",
         imports,
-        overwrite = True,
+        overwrite = False,
     )
     
     # Patch Trainer
