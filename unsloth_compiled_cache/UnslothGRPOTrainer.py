@@ -1018,6 +1018,7 @@ class _UnslothGRPOTrainer(Trainer):
 
         self._metrics["reward"].append(rewards.mean().item())
         self._metrics["reward_std"].append(std_grouped_rewards.mean().item())
+        self._metrics["advantage"].append(advantages.mean().item())
 
         if (
             self.log_completions
