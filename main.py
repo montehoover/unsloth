@@ -35,6 +35,14 @@ XML_COT_FORMAT = """\
 ####################
 # Reward functions
 ####################
+# Roughly between 0.0 and 4.0, with possibility for negative rewards from xmlcount.
+# Breakdown:
+#   Correctness: 2.0
+#   Format: 2.0
+#     Xml tags present: 0.125 per tag for total of 0.5
+#     All 4 xml tag bonus: 0.5
+#     All 4 xml tag plus newlines: 0.5
+#     Labels printed correctly: 0.5
 def correctness_reward_func(prompts, completions, answer, **kwargs) -> list[float]:
     responses = [completion[0]['content'] for completion in completions]
     q = prompts[0][-1]['content']
@@ -63,6 +71,7 @@ def soft_format_reward_func(completions, **kwargs) -> list[float]:
     return [0.5 if match else 0.0 for match in matches]
 
 def count_xml(text) -> float:
+    """Add rewards for each xml tag that is present, and penalize any characters that exist after </answer>. (Also ends up being a length penalty if </answer> is missing.)"""
     count = 0.0
     if text.count("<reasoning>\n") == 1:
         count += 0.125
