@@ -27,8 +27,9 @@
    [rank0]:[W305 11:48:31.171114528 ProcessGroupNCCL.cpp:1250] Warning: WARNING: process group has NOT been destroyed[rank0]:[W305 11:48:31.171114528 ProcessGroupNCCL.cpp:1250] Warning: WARNING: process group has NOT been destroyed
    ```
 
-3. Run GRPO on compliance dataset:
+3. Run GRPO on compliance dataset. Use convert_unsloth.py to preprocess dataset first.
    ```
+   python scripts/convert_unsloth.py
    python main.py
    ```
 

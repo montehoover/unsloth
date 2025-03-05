@@ -4,3 +4,5 @@ unsloth_compiled_cache/
 outputs/
 model/
 grpo_trainer_lora_model/
+data/
+log/

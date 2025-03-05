@@ -1,0 +1,5 @@
+[default]
+entity = tomg-group-umd
+project = guardian-models
+base_url = https://api.wandb.ai
+

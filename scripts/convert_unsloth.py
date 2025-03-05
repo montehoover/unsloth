@@ -5,8 +5,8 @@ import datasets
 
 # These constants should match the constants at the top of main.py
 # TODO: Move these constants to a shared file
-INPUT_FIELD = "input"
-OUTPUT_FIELD = "output"
+INPUT_FIELD = "question"
+OUTPUT_FIELD = "answer"
 LABEL_DELIMITER = "\nCOMPLIANCE OUTPUT:"
 
 

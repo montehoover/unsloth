@@ -317,7 +317,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="🦥 Fine-tune your llm faster using unsloth!")
 
     model_group = parser.add_argument_group("🤖 Model Options")
-    model_group.add_argument('--model_name', type=str, default="meta-llama/Llama-3.2-1B-Instruct", help="Model name to load")
+    model_group.add_argument('--model_name', type=str, default="meta-llama/meta-Llama-3.1-8B-Instruct", help="Model name to load")
+    # model_group.add_argument('--model_name', type=str, default="meta-llama/Llama-3.2-1B-Instruct", help="Model name to load")
     model_group.add_argument('--max_seq_length', type=int, default=512, help="Maximum sequence length, default is 512. We auto support RoPE Scaling internally!")
     model_group.add_argument('--dtype', type=str, default=None, help="Data type for model (None for auto detection)")
     model_group.add_argument('--load_in_4bit', action=argparse.BooleanOptionalAction, default=True, help="Use 4bit quantization to reduce memory usage")
@@ -338,7 +339,7 @@ def parse_args():
     training_group.add_argument('--per_device_train_batch_size', type=int, default=1, help="Batch size per device during training, default is 1.")
     training_group.add_argument('--gradient_accumulation_steps', type=int, default=1, help="Number of gradient accumulation steps, default is 1. Increase to 4 for smoother training.")
     training_group.add_argument('--warmup_steps', type=int, default=5, help="Number of warmup steps, default is 5, not used if warmup_ratio is set.")
-    training_group.add_argument('--max_steps', type=int, default=3, help="Maximum number of training steps.")
+    training_group.add_argument('--max_steps', type=int, default=250, help="Maximum number of training steps.")
     training_group.add_argument('--save_steps', type=int, default=250, help="Save steps, default is 250.")
     training_group.add_argument('--num_train_epochs', type=int, default=1, help="Number of training epochs, only used if max_steps = -1.")
     training_group.add_argument('--learning_rate', type=float, default=2e-4, help="Learning rate, default is 2e-4.")
