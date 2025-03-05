@@ -278,11 +278,11 @@ def run(args):
         logger.info(f"Before training: \n{output}")
 
         # After training, with the LoRA adaptor
-        model.save_lora("grpo_saved_lora")
+        model.save_lora("outputs/grpo_saved_lora")
         output = model.fast_generate(
             text,
             sampling_params = sampling_params,
-            lora_request = model.load_lora("grpo_saved_lora"),
+            lora_request = model.load_lora("outputs/grpo_saved_lora"),
         )[0].outputs[0].text
         logger.info(f"After training: \n{output}")
 
