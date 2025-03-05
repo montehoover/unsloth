@@ -1,50 +1,17 @@
-#!/usr/bin/env python3
-
-"""
-🦥 Starter Script for Fine-Tuning FastLanguageModel with Unsloth
-
-This script is designed as a starting point for fine-tuning your models using unsloth.
-It includes configurable options for model loading, PEFT parameters, training arguments, 
-and model saving/pushing functionalities.
-
-You will likely want to customize this script to suit your specific use case 
-and requirements.
-
-Here are a few suggestions for customization:
-    - Modify the dataset loading and preprocessing steps to match your data.
-    - Customize the model saving and pushing configurations.
-
-Usage: (most of the options have valid default values this is an extended example for demonstration purposes)
-    python unsloth-cli.py --model_name "unsloth/llama-3-8b" --max_seq_length 8192 --dtype None --load_in_4bit \
-    --r 64 --lora_alpha 32 --lora_dropout 0.1 --bias "none" --use_gradient_checkpointing "unsloth" \
-    --random_state 3407 --use_rslora --per_device_train_batch_size 4 --gradient_accumulation_steps 8 \
-    --warmup_steps 5 --max_steps 400 --learning_rate 2e-6 --logging_steps 1 --optim "adamw_8bit" \
-    --weight_decay 0.005 --lr_scheduler_type "linear" --seed 3407 --output_dir "outputs" \
-    --report_to "tensorboard" --save_model --save_path "model" --quantization_method "f16" \
-    --push_model --hub_path "hf/model" --hub_token "your_hf_token"
-
-To see a full list of configurable options, use:
-    python unsloth-cli.py --help
-
-Happy fine-tuning!
-"""
-
 import argparse
 import os
-import torch
 from unsloth import FastLanguageModel, PatchFastRL, is_bfloat16_supported
 from datasets import load_dataset, Dataset
-from transformers.utils import strtobool
-from trl import SFTTrainer, GRPOConfig, GRPOTrainer
-from transformers import TrainingArguments
+from trl import GRPOConfig, GRPOTrainer
+from transformers import AutoModelForCausalLM
 from unsloth import is_bfloat16_supported
+import re
+from vllm import SamplingParams
+
 
 import logging
 logger = logging.getLogger(__name__)
 
-##############
-# GRPO stuff
-##############
 
 SYSTEM_PROMPT = """
     Respond in the following format:
@@ -65,29 +32,9 @@ XML_COT_FORMAT = """\
     </answer>
     """
 
-def extract_xml_answer(text: str) -> str:
-    answer = text.split("<answer>")[-1]
-    answer = answer.split("</answer>")[0]
-    return answer.strip()
-
-def extract_hash_answer(text: str) -> str | None:
-    if "####" not in text:
-        return None
-    return text.split("####")[1].strip()
-
-# uncomment middle messages for 1-shot prompting
-def get_gsm8k_questions(split = "train") -> Dataset:
-    data = load_dataset('openai/gsm8k', 'main')[split] # type: ignore
-    data = data.map(lambda x: { # type: ignore
-        'prompt': [
-            {'role': 'system', 'content': SYSTEM_PROMPT},
-            {'role': 'user', 'content': x['question']}
-        ],
-        'answer': extract_hash_answer(x['answer'])
-    }) # type: ignore
-    return data # type: ignore
-
+####################
 # Reward functions
+####################
 def correctness_reward_func(prompts, completions, answer, **kwargs) -> list[float]:
     responses = [completion[0]['content'] for completion in completions]
     q = prompts[0][-1]['content']
@@ -95,20 +42,21 @@ def correctness_reward_func(prompts, completions, answer, **kwargs) -> list[floa
     print('-'*20, f"Question:\n{q}", f"\nAnswer:\n{answer[0]}", f"\nResponse:\n{responses[0]}", f"\nExtracted:\n{extracted_responses[0]}")
     return [2.0 if r == a else 0.0 for r, a in zip(extracted_responses, answer)]
 
-def int_reward_func(completions, **kwargs) -> list[float]:
+def label_reward_func(completions, **kwargs) -> list[float]:
+    """Reward function that checks if the label is exactly PASS or FAIL."""
     responses = [completion[0]['content'] for completion in completions]
     extracted_responses = [extract_xml_answer(r) for r in responses]
-    return [0.5 if r.isdigit() else 0.0 for r in extracted_responses]
+    return [0.5 if r in ["PASS", "FAIL"] else 0.0 for r in extracted_responses]
 
 def strict_format_reward_func(completions, **kwargs) -> list[float]:
-    """Reward function that checks if the completion has a specific format."""
+    """Reward function that checks if the completion is in XML_COT_FORMAT, strictly adhering to newlines."""
     pattern = r"^<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>\n$"
     responses = [completion[0]["content"] for completion in completions]
     matches = [re.match(pattern, r) for r in responses]
     return [0.5 if match else 0.0 for match in matches]
 
 def soft_format_reward_func(completions, **kwargs) -> list[float]:
-    """Reward function that checks if the completion has a specific format."""
+    """Reward function that checks if the completion is in XML_COT_FORMAT, with flexibility in newlines."""
     pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
     responses = [completion[0]["content"] for completion in completions]
     matches = [re.match(pattern, r) for r in responses]
@@ -131,15 +79,61 @@ def count_xml(text) -> float:
 def xmlcount_reward_func(completions, **kwargs) -> list[float]:
     contents = [completion[0]["content"] for completion in completions]
     return [count_xml(c) for c in contents]
+#######################
+# End reward functions
+#######################
 
-def get_grpo_trainer(model, tokenizer):
-    logger.debug(f"Getting GRPO model thing...")
+
+def extract_xml_answer(text: str) -> str:
+    answer = text.split("<answer>")[-1]
+    answer = answer.split("</answer>")[0]
+    return answer.strip()
+
+def extract_hash_answer(text: str) -> str | None:
+    if "####" not in text:
+        return None
+    return text.split("####")[1].strip()
+
+def int_reward_func(completions, **kwargs) -> list[float]:
+    """Reward function that checks if the label is exactly PASS or FAIL."""
+    responses = [completion[0]['content'] for completion in completions]
+    extracted_responses = [extract_xml_answer(r) for r in responses]
+    return [0.5 if r.isdigit() else 0.0 for r in extracted_responses]
+
+# uncomment middle messages for 1-shot prompting
+def get_gsm8k_questions(split = "train") -> Dataset:
+    data = load_dataset('openai/gsm8k', 'main')[split] # type: ignore
+    data = data.map(lambda x: { # type: ignore
+        'prompt': [
+            {'role': 'system', 'content': SYSTEM_PROMPT},
+            {'role': 'user', 'content': x['question']}
+        ],
+        'answer': extract_hash_answer(x['answer'])
+    }) # type: ignore
+    return data # type: ignore
+
+#TODO:  Fix the format so this and script/convert_torchtune.py match properly
+def get_compliance_examples(split = "train") -> Dataset:
+    data = load_dataset('json', data_files="data/easy_train_7500.jsonl")['train']
+    data = data.map(lambda x: { # type: ignore
+        'prompt': [
+            {'role': 'system', 'content': SYSTEM_PROMPT},
+            {'role': 'user', 'content': x['question']}
+        ],
+        'answer': extract_hash_answer(x['answer'])
+    }) # type: ignore
+    return data # type: ignore
+
+
+
+def get_grpo_trainer(args, model, tokenizer):
+    logger.info(f"Getting GRPO model thing...")
     PatchFastRL("GRPO", FastLanguageModel)
     
-    logger.debug(f"Loading gsm8k dataset...")
+    logger.info(f"Loading gsm8k dataset...")
     dataset = get_gsm8k_questions()
 
-    logger.debug(f"Setting up GRPO trainer...")
+    logger.info(f"Setting up GRPO trainer...")
     training_args = GRPOConfig(
         use_vllm = args.use_vllm, # use vLLM for fast inference!
         learning_rate = args.learning_rate,
@@ -189,7 +183,7 @@ def configure_logging(log_level):
     )
 
 def run(args):
-    logger.debug(f"Loading model...")
+    logger.info(f"Loading model...")
     # Load model and tokenizer
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.model_name,
@@ -206,7 +200,7 @@ def run(args):
         gpu_memory_utilization = args.gpu_memory_utilization, # Reduce if out of memory
     )
 
-    logger.debug(f"Turning model into PEFT...")
+    logger.info(f"Turning model into PEFT...")
     # Configure PEFT model
     model = FastLanguageModel.get_peft_model(
         model,
@@ -220,17 +214,17 @@ def run(args):
         random_state = args.seed,
     )
 
-    logger.debug(f"Getting GRPO trainer...")
-    trainer = get_grpo_trainer(model, tokenizer)
+    logger.info(f"Getting GRPO trainer...")
+    trainer = get_grpo_trainer(args, model, tokenizer)
 
     # Train model
-    logger.debug(f"Training model...")
+    logger.info(f"Training model...")
     trainer_stats = trainer.train()
-    logger.debug(f"Training complete")
+    logger.info(f"Training complete")
 
     # Save model
     if args.save_model:
-        logger.debug(f"Saving model...")
+        logger.info(f"Saving model...")
         # if args.quantization_method is a list, we will save the model for each quantization method
         if args.save_gguf:
             if isinstance(args.quantization, list):
@@ -263,6 +257,49 @@ def run(args):
     else:
         print("Warning: The model is not saved!")
 
+    # Test generation
+    level = logging.getLevelName(logger.getEffectiveLevel())
+    if level == "INFO" or level == "DEBUG":
+        text = tokenizer.apply_chat_template([
+            {"role" : "user", "content" : "Calculate pi."},
+        ], tokenize = False, add_generation_prompt = True)
+        sampling_params = SamplingParams(
+            temperature = 0.8,
+            top_p = 0.95,
+            max_tokens = 1024,
+        )
+
+        # Before training, without the LoRA adaptor
+        output = model.fast_generate(
+            [text],
+            sampling_params = sampling_params,
+            lora_request = None,
+        )[0].outputs[0].text
+        logger.info(f"Before training: \n{output}")
+
+        # After training, with the LoRA adaptor
+        model.save_lora("grpo_saved_lora")
+        output = model.fast_generate(
+            text,
+            sampling_params = sampling_params,
+            lora_request = model.load_lora("grpo_saved_lora"),
+        )[0].outputs[0].text
+        logger.info(f"After training: \n{output}")
+
+        # Also test huggingface style generation
+        # model.save_pretrained_merged(args.save_path, tokenizer, args.save_method)
+        # model = AutoModelForCausalLM.from_pretrained(args.save_path, device_map="auto").eval()
+        # input_ids = tokenizer(text, return_tensors="pt").input_ids.to(model.device)
+        # output = model.generate(
+        #     input_ids,
+        #     max_new_tokens=1024,
+        #     temperature=0.8,
+        #     top_p=0.95,
+        #     return_dict_in_generate=True,
+        # )
+        # output = tokenizer.decode(output.sequences[0])
+        # logger.info(f"Huggingface generation: \n{output}")
+
 
 def parse_args():
     # Define argument parser
@@ -270,11 +307,11 @@ def parse_args():
 
     model_group = parser.add_argument_group("🤖 Model Options")
     model_group.add_argument('--model_name', type=str, default="meta-llama/meta-Llama-3.1-8B-Instruct", help="Model name to load")
-    # model_group.add_argument('--model_name', type=str, default="unsloth/llama-3-8b", help="Model name to load")
     model_group.add_argument('--max_seq_length', type=int, default=512, help="Maximum sequence length, default is 512. We auto support RoPE Scaling internally!")
     model_group.add_argument('--dtype', type=str, default=None, help="Data type for model (None for auto detection)")
     model_group.add_argument('--load_in_4bit', action=argparse.BooleanOptionalAction, default=True, help="Use 4bit quantization to reduce memory usage")
     model_group.add_argument('--dataset', type=str, default="yahma/alpaca-cleaned", help="Huggingface dataset to use for training")
+    model_group.add_argument('--use_vllm', action=argparse.BooleanOptionalAction, default=True, help="Use vLLM for fast inference in GRPO rollouts.")
 
     lora_group = parser.add_argument_group("🧠 LoRA Options", "These options are used to configure the LoRA model.")
     lora_group.add_argument('--lora_rank', type=int, default=32, help="Rank for Lora model, default is 32.  (common values: 8, 16, 32, 64, 128)")
@@ -290,7 +327,7 @@ def parse_args():
     training_group.add_argument('--per_device_train_batch_size', type=int, default=1, help="Batch size per device during training, default is 1.")
     training_group.add_argument('--gradient_accumulation_steps', type=int, default=1, help="Number of gradient accumulation steps, default is 1. Increase to 4 for smoother training.")
     training_group.add_argument('--warmup_steps', type=int, default=5, help="Number of warmup steps, default is 5, not used if warmup_ratio is set.")
-    training_group.add_argument('--max_steps', type=int, default=5, help="Maximum number of training steps.")
+    training_group.add_argument('--max_steps', type=int, default=1, help="Maximum number of training steps.")
     training_group.add_argument('--save_steps', type=int, default=250, help="Save steps, default is 250.")
     training_group.add_argument('--num_train_epochs', type=int, default=1, help="Number of training epochs, only used if max_steps = -1.")
     training_group.add_argument('--learning_rate', type=float, default=2e-4, help="Learning rate, default is 2e-4.")
@@ -304,21 +341,18 @@ def parse_args():
     training_group.add_argument('--max_prompt_length', type=int, default=256, help="Maximum prompt length, default is 256.")
     training_group.add_argument('--max_completion_length', type=int, default=200, help="Maximum completion length, default is 200.")
     training_group.add_argument('--max_grad_norm', type=float, default=0.1, help="Maximum gradient norm, default is 0.1.")
-    training_group.add_argument('--report_to', type=str, default="none", help="Report to platform like weights and bias, default is 'none'.")
-    training_group.add_argument('--output_dir', type=str, default="outputs", help="Output directory.")
     training_group.add_argument('--gpu_memory_utilization', type=float, default=0.6, help="GPU memory utilization, default is 0.6. Reduce if out of memory.")
-    training_group.add_argument('--use_gradient_checkpointing', type=str, default="unsloth", help="Use gradient checkpointing. Default is 'unsloth'.")
     training_group.add_argument('--seed', type=int, default=3407, help="Seed for reproducibility, default is 3407.")
     
     # Report/Logging arguments
     report_group = parser.add_argument_group("📊 Report Options")
-    report_group.add_argument('--report_to', type=str, default="tensorboard",
+    report_group.add_argument('--report_to', type=str, default="none",
         choices=["azure_ml", "clearml", "codecarbon", "comet_ml", "dagshub", "dvclive", "flyte", "mlflow", "neptune", "tensorboard", "wandb", "all", "none"],
         help="The list of integrations to report the results and logs to. Supported platforms are: \n\t\t 'azure_ml', 'clearml', 'codecarbon', 'comet_ml', 'dagshub', 'dvclive', 'flyte', 'mlflow', 'neptune', 'tensorboard', and 'wandb'. Use 'all' to report to all integrations installed, 'none' for no integrations.")
     report_group.add_argument('--logging_steps', type=int, default=1, help="Logging steps, default is 1")
     report_group.add_argument('--log_level', type=str, 
         choices=['debug', 'info', 'warning', 'error', 'critical', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], 
-        help="Explicitly set logging level to override environment variable. Defaults to WARNING. Options: DEBUG, INFO, WARNING, ERROR, CRITICAL")
+        help="Explicitly set logging level to override environment variable. Defaults to INFO when no environment variable set nor argument passed. Options: DEBUG, INFO, WARNING, ERROR, CRITICAL")
 
     # Saving and pushing arguments
     save_group = parser.add_argument_group('💾 Save Model Options')
