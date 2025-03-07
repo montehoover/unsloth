@@ -1,3 +1,10 @@
+"""
+2025.3.3
+2025.3.2
+4.49.0
+0.15.2
+__UNSLOTH_VERSIONING__
+"""
 from torch import Tensor
 import torch
 import torch.nn as nn

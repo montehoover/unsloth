@@ -1,3 +1,10 @@
+"""
+2025.3.3
+2025.3.2
+4.49.0
+0.15.2
+__UNSLOTH_VERSIONING__
+"""
 from torch import Tensor
 import torch
 import torch.nn as nn
@@ -113,7 +120,7 @@ class UnslothEfficientGRPO(torch.autograd.Function):
             fullgraph = True,
             options = torch_compile_options,
         )
-        
+
         grad_inputs_chunks = torch.chunk(grad_inputs,        chunks = n_chunks, dim = 0)
         new_hidden_states  = torch.chunk(_new_hidden_states, chunks = n_chunks, dim = 0)
         old_hidden_states  = torch.chunk(_old_hidden_states, chunks = n_chunks, dim = 0)
@@ -1018,7 +1025,6 @@ class _UnslothGRPOTrainer(Trainer):
 
         self._metrics["reward"].append(rewards.mean().item())
         self._metrics["reward_std"].append(std_grouped_rewards.mean().item())
-        self._metrics["advantage"].append(advantages.mean().item())
 
         if (
             self.log_completions

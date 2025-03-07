@@ -10,6 +10,8 @@ from vllm import SamplingParams
 
 import logging
 logger = logging.getLogger(__name__)
+os.environ["WANDB_ENTITY"] = "guardian-models"
+os.environ["WANDB_PROJECT"] = "grpo-gsm8k"
 
 
 SYSTEM_PROMPT = """
@@ -339,7 +341,7 @@ def parse_args():
     training_group.add_argument('--per_device_train_batch_size', type=int, default=1, help="Batch size per device during training, default is 1.")
     training_group.add_argument('--gradient_accumulation_steps', type=int, default=1, help="Number of gradient accumulation steps, default is 1. Increase to 4 for smoother training.")
     training_group.add_argument('--warmup_steps', type=int, default=5, help="Number of warmup steps, default is 5, not used if warmup_ratio is set.")
-    training_group.add_argument('--max_steps', type=int, default=250, help="Maximum number of training steps.")
+    training_group.add_argument('--max_steps', type=int, default=3, help="Maximum number of training steps.")
     training_group.add_argument('--save_steps', type=int, default=250, help="Save steps, default is 250.")
     training_group.add_argument('--num_train_epochs', type=int, default=1, help="Number of training epochs, only used if max_steps = -1.")
     training_group.add_argument('--learning_rate', type=float, default=2e-4, help="Learning rate, default is 2e-4.")

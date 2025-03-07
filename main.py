@@ -9,9 +9,11 @@ from unsloth import is_bfloat16_supported
 import re
 from vllm import SamplingParams
 
-
 import logging
 logger = logging.getLogger(__name__)
+os.environ["WANDB_ENTITY"] = "guardian-models"
+os.environ["WANDB_PROJECT"] = "grpo-compliance"
+
 
 # These constants should match the constants at the top of scripts/convert_unsloth.py
 # TODO: Move these constants to a shared file
@@ -65,6 +67,7 @@ def correctness_reward_func(prompts, completions, answer, **kwargs) -> list[floa
     responses = [completion[0]['content'] for completion in completions]
     q = prompts[0][-1]['content']
     extracted_responses = [extract_xml_answer(r) for r in responses]
+    # Print out the first of the six rollouts for debugging.
     logger.info(f"{'-'*20} Question:\n{q}\nAnswer:\n{answer[0]}\nResponse:\n{responses[0]}\nExtracted:\n{extracted_responses[0]}")
     return [2.0 if r == a else 0.0 for r, a in zip(extracted_responses, answer)]
 
@@ -98,9 +101,11 @@ def count_xml(text) -> float:
     if text.count("\n<answer>\n") == 1:
         count += 0.125
         count -= len(text.split("\n</answer>\n")[-1])*0.001
+        logger.debug(f"Num extra chars: {len(text.split("\n</answer>\n"))}, extra chars: {text.split("\n</answer>\n")[-1]}")
     if text.count("\n</answer>") == 1:
         count += 0.125
         count -= (len(text.split("\n</answer>")[-1]) - 1)*0.001
+        logger.debug(f"Num extra chars: {len(text.split("\n</answer>"))}, extra chars: {text.split("\n</answer>")[-1]}")
     return count
 
 def xmlcount_reward_func(completions, **kwargs) -> list[float]:
@@ -145,6 +150,7 @@ def get_grpo_trainer(args, model, tokenizer):
 
     logger.info(f"Setting up GRPO trainer...")
     run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    short_model_name = args.model_name.split("/")[-1]
     training_args = GRPOConfig(
         use_vllm = args.use_vllm, # use vLLM for fast inference!
         learning_rate = args.learning_rate,
@@ -168,6 +174,7 @@ def get_grpo_trainer(args, model, tokenizer):
         max_grad_norm = args.max_grad_norm,
         report_to = args.report_to, # Can use Weights & Biases
         output_dir = f"{args.output_dir}/{run_id}",
+        run_name = f"{short_model_name}_{run_id}",
     )
     if args.correctness_only:
         reward_funcs = [correctness_reward_func]
