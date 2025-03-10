@@ -21,15 +21,6 @@ INPUT_FIELD = "question"
 OUTPUT_FIELD = "answer"
 LABEL_DELIMITER = "\nCOMPLIANCE OUTPUT:"
 
-XML_COT_FORMAT = """\
-    <reasoning>
-    {reasoning}
-    </reasoning>
-    <answer>
-    {answer}
-    </answer>
-    """
-
 SYSTEM_PROMPT = """
 You are a guardian model evaluating the compliance of a chatbot agent to various rules. 
 You will be given a rule that the agent must follow, along with a conversation between the agent and a user. 
@@ -55,58 +46,59 @@ PASS/FAIL
 ####################
 # Reward functions
 ####################
-# Roughly between 0.0 and 4.0, with possibility for negative rewards from xmlcount.
+# Roughly between 0.0 and 4.0, with possibility for negative rewards for length penalty.
 # Breakdown:
-#   Correctness: 2.0
-#   Format: 2.0
-#     Xml tags present: 0.125 per tag for total of 0.5
-#     All 4 xml tag bonus: 0.5
-#     All 4 xml tag plus newlines: 0.5
-#     Labels printed correctly: 0.5
+#   Correctness: 2.5
+#   Format: 1.6
+#     Xml tags present: 0.1 per tag for total of 0.4
+#     All 4 xml tag bonus: 0.4
+#     All 4 xml tag plus newlines: 0.4
+#     Labels printed correctly: 0.4
+#  Length: -0.0001 per character, for maximum of -0.2048
 def correctness_reward_func(prompts, completions, answer, **kwargs) -> list[float]:
     responses = [completion[0]['content'] for completion in completions]
     q = prompts[0][-1]['content']
     extracted_responses = [extract_xml_answer(r) for r in responses]
     # Print out the first of the six rollouts for debugging.
     logger.info(f"{'-'*20} Question:\n{q}\nAnswer:\n{answer[0]}\nResponse:\n{responses[0]}\nExtracted:\n{extracted_responses[0]}")
-    return [2.0 if r == a else 0.0 for r, a in zip(extracted_responses, answer)]
+    return [2.5 if r == a else 0.0 for r, a in zip(extracted_responses, answer)]
 
 def label_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the label is exactly PASS or FAIL."""
     responses = [completion[0]['content'] for completion in completions]
     extracted_responses = [extract_xml_answer(r) for r in responses]
-    return [0.5 if r in ["PASS", "FAIL"] else 0.0 for r in extracted_responses]
+    return [0.4 if r in ["PASS", "FAIL"] else 0.0 for r in extracted_responses]
 
 def strict_format_reward_func(completions, **kwargs) -> list[float]:
-    """Reward function that checks if the completion is in XML_COT_FORMAT, strictly adhering to newlines."""
-    pattern = r"^<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>\n$"
+    """Reward function that checks if the completion is in XML_COT_FORMAT, strictly adhering to newlines before and after every tag."""
+    pattern = r"^\n<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>\n$"
     responses = [completion[0]["content"] for completion in completions]
-    matches = [re.match(pattern, r) for r in responses]
-    return [0.5 if match else 0.0 for match in matches]
+    matches = [re.search(pattern, r) for r in responses]
+    return [0.4 if match else 0.0 for match in matches]
 
 def soft_format_reward_func(completions, **kwargs) -> list[float]:
-    """Reward function that checks if the completion is in XML_COT_FORMAT, with flexibility in newlines."""
-    pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
+    """Reward function that checks if the completion is in XML_COT_FORMAT, with flexibility in newlines and whitespace."""
+    pattern = r"^\s*<reasoning>\s*.*?\s*</reasoning>\s*<answer>\s*.*?\s*</answer>\s*$"
     responses = [completion[0]["content"] for completion in completions]
-    matches = [re.match(pattern, r) for r in responses]
-    return [0.5 if match else 0.0 for match in matches]
+    matches = [re.search(pattern, r) for r in responses]
+    return [0.4 if match else 0.0 for match in matches]
 
 def count_xml(text) -> float:
-    """Add rewards for each xml tag that is present, and penalize any characters that exist after </answer>. (Also ends up being a length penalty if </answer> is missing.)"""
+    """We want to encourage xml tags to be present, so just give rewards if they are present at all. Let other functions handle extraneous stuff."""
     count = 0.0
     if text.count("<reasoning>\n") == 1:
-        count += 0.125
+        count += 0.1
     if text.count("\n</reasoning>\n") == 1:
-        count += 0.125
+        count += 0.1
     if text.count("\n<answer>\n") == 1:
-        count += 0.125
-        count -= len(text.split("\n</answer>\n")[-1])*0.001
-        logger.debug(f"Num extra chars: {len(text.split("\n</answer>\n"))}, extra chars: {text.split("\n</answer>\n")[-1]}")
+        count += 0.1
     if text.count("\n</answer>") == 1:
-        count += 0.125
-        count -= (len(text.split("\n</answer>")[-1]) - 1)*0.001
-        logger.debug(f"Num extra chars: {len(text.split("\n</answer>"))}, extra chars: {text.split("\n</answer>")[-1]}")
+        count += 0.1
     return count
+
+def length_penalty(text) -> float:
+    """The shorter the better. The maximum penalty is max_new_tokens * chars * 0.0001, so roughly 512 * 4 * 0.0001 = 0.2048."""
+    return -(len(text))*0.0001
 
 def xmlcount_reward_func(completions, **kwargs) -> list[float]:
     contents = [completion[0]["content"] for completion in completions]
@@ -361,7 +353,7 @@ def parse_args():
     training_group.add_argument('--gradient_accumulation_steps', type=int, default=1, help="Number of gradient accumulation steps, default is 1. Increase to 4 for smoother training.")
     training_group.add_argument('--warmup_steps', type=int, default=5, help="Number of warmup steps, default is 5, not used if warmup_ratio is set.")
     training_group.add_argument('--max_steps', type=int, default=-1, help="Maximum number of training steps.")
-    training_group.add_argument('--save_steps', type=int, default=100, help="Save steps, default is 250.")
+    training_group.add_argument('--save_steps', type=int, default=250, help="Save steps, default is 250.")
     training_group.add_argument('--num_train_epochs', type=int, default=1, help="Number of training epochs, only used if max_steps = -1.")
     training_group.add_argument('--learning_rate', type=float, default=2e-4, help="Learning rate, default is 2e-4.")
     training_group.add_argument('--optim', type=str, default="paged_adamw_8bit", help="Optimizer type.")
@@ -371,8 +363,8 @@ def parse_args():
     training_group.add_argument('--warmup_ratio', type=float, default=0.1, help="Warmup ratio, default is 0.1.")
     training_group.add_argument('--lr_scheduler_type', type=str, default="cosine", help="Learning rate scheduler type, default is 'cosine'.")
     training_group.add_argument('--num_generations', type=int, default=6, help="Number of GRPO rollouts, default is 6. Decrease if out of memory.")
-    training_group.add_argument('--max_prompt_length', type=int, default=1024, help="Maximum prompt length, default is 1024.")
-    training_group.add_argument('--max_completion_length', type=int, default=1024, help="Maximum completion length, default is 1024.")
+    training_group.add_argument('--max_prompt_length', type=int, default=8192, help="Maximum prompt length, default is 8192.")
+    training_group.add_argument('--max_completion_length', type=int, default=512, help="Maximum completion length, default is 512.")
     training_group.add_argument('--max_grad_norm', type=float, default=0.1, help="Maximum gradient norm, default is 0.1.")
     training_group.add_argument('--gpu_memory_utilization', type=float, default=0.6, help="GPU memory utilization, default is 0.6. Reduce if out of memory.")
     training_group.add_argument('--correctness_only', action=argparse.BooleanOptionalAction, default=False, help="Use correctness reward function only.")
