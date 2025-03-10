@@ -28,6 +28,9 @@ torch_compile_options = {
     "triton.cudagraphs" : False,
 }
 
+import logging
+logger = logging.getLogger(__name__)
+
 @torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
 def selective_log_softmax(logits, index):
     logits = logits.to(torch.float32)
@@ -1025,6 +1028,7 @@ class _UnslothGRPOTrainer(Trainer):
 
         self._metrics["reward"].append(rewards.mean().item())
         self._metrics["reward_std"].append(std_grouped_rewards.mean().item())
+        self._metrics["advantage"].append(advantages.mean().item())
 
         if (
             self.log_completions
@@ -1126,6 +1130,7 @@ class _UnslothGRPOTrainer(Trainer):
             super().log(logs, start_time)
         else:  # transformers<=4.46
             super().log(logs)
+        logger.info(logs)
         self._metrics.clear()
 
     def create_model_card(
