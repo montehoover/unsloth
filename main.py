@@ -142,7 +142,11 @@ def get_grpo_trainer(args, model, tokenizer):
 
     logger.info(f"Setting up GRPO trainer...")
     run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    short_model_name = args.model_name.split("/")[-1]
+    path_parts = args.model_name.split("/")
+    if path_parts[-1] == "huggingface":
+        short_model_name = path_parts[-2]
+    else:
+        short_model_name = path_parts[-1]
     training_args = GRPOConfig(
         use_vllm = args.use_vllm, # use vLLM for fast inference!
         learning_rate = args.learning_rate,
@@ -331,7 +335,7 @@ def parse_args():
     model_group = parser.add_argument_group("🤖 Model Options")
     # model_group.add_argument('--model_name', type=str, default="meta-llama/meta-Llama-3.1-8B-Instruct", help="Model name to load")
     model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/checkpoints/8B_lora_2500/huggingface", help="Model name to load")
-    model_group.add_argument('--max_seq_length', type=int, default=2048, help="Maximum sequence length, default is 2048. We auto support RoPE Scaling internally!")
+    model_group.add_argument('--max_seq_length', type=int, default=3512, help="Maximum sequence length, default is 2048. We auto support RoPE Scaling internally!")
     model_group.add_argument('--dtype', type=str, default=None, help="Data type for model (None for auto detection)")
     model_group.add_argument('--load_in_4bit', action=argparse.BooleanOptionalAction, default=True, help="Use 4bit quantization to reduce memory usage")
     model_group.add_argument('--dataset', type=str, default="yahma/alpaca-cleaned", help="Huggingface dataset to use for training")
@@ -352,7 +356,7 @@ def parse_args():
     training_group.add_argument('--gradient_accumulation_steps', type=int, default=1, help="Number of gradient accumulation steps, default is 1. Increase to 4 for smoother training.")
     training_group.add_argument('--warmup_steps', type=int, default=5, help="Number of warmup steps, default is 5, not used if warmup_ratio is set.")
     training_group.add_argument('--max_steps', type=int, default=-1, help="Maximum number of training steps.")
-    training_group.add_argument('--save_steps', type=int, default=250, help="Save steps, default is 250.")
+    training_group.add_argument('--save_steps', type=int, default=10000, help="Save steps, default is 250.")
     training_group.add_argument('--num_train_epochs', type=int, default=1, help="Number of training epochs, only used if max_steps = -1.")
     training_group.add_argument('--learning_rate', type=float, default=2e-4, help="Learning rate, default is 2e-4.")
     training_group.add_argument('--optim', type=str, default="paged_adamw_8bit", help="Optimizer type.")
@@ -362,10 +366,10 @@ def parse_args():
     training_group.add_argument('--warmup_ratio', type=float, default=0.1, help="Warmup ratio, default is 0.1.")
     training_group.add_argument('--lr_scheduler_type', type=str, default="cosine", help="Learning rate scheduler type, default is 'cosine'.")
     training_group.add_argument('--num_generations', type=int, default=6, help="Number of GRPO rollouts, default is 6. Decrease if out of memory.")
-    training_group.add_argument('--max_prompt_length', type=int, default=2048, help="Maximum prompt length, default is 2048.")
+    training_group.add_argument('--max_prompt_length', type=int, default=3000, help="Maximum prompt length, default is 2048.")
     training_group.add_argument('--max_completion_length', type=int, default=512, help="Maximum completion length, default is 512.")
     training_group.add_argument('--max_grad_norm', type=float, default=0.1, help="Maximum gradient norm, default is 0.1.")
-    training_group.add_argument('--gpu_memory_utilization', type=float, default=0.68, help="GPU memory utilization, default is 0.6. Reduce if out of memory.")
+    training_group.add_argument('--gpu_memory_utilization', type=float, default=0.7, help="GPU memory utilization, default is 0.6. Reduce if out of memory.")
     training_group.add_argument('--correctness_only', action=argparse.BooleanOptionalAction, default=False, help="Use correctness reward function only.")
     training_group.add_argument('--seed', type=int, default=3407, help="Seed for reproducibility, default is 3407.")
     

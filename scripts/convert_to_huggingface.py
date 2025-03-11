@@ -5,16 +5,18 @@ import argparse
 
 
 def main(args):
+    print("This requires 2x the model size in cpu memory, so 32G for an 8B model.")
+
     root = "/fs/cml-projects/guardian_models/models"
     if args.model_size == "1B":
-        model_path = "Meta-Llama-3.2-1B-Instruct"
+        model_name = "Meta-Llama-3.2-1B-Instruct"
     elif args.model_size == "3B":
-        model_path = "Meta-Llama-3.2-3B-Instruct"
+        model_name = "Meta-Llama-3.2-3B-Instruct"
     elif args.model_size == "8B":
-        model_path = "Meta-Llama-3.1-8B-Instruct"
+        model_name = "Meta-Llama-3.1-8B-Instruct"
 
-    base_path = f"{root}/{model_path}"
-    lora_path = f"{base_path}/checkpoints/{args.model_size}_lora_{args.num_examples}"
+    base_path = f"{root}/{model_name}"
+    lora_path = f"{base_path}/checkpoints/{args.model_size}_lora_{args.train_count}"
     hf_directory = f"{lora_path}/huggingface"
 
     print(f"loading model from {base_path}...")
@@ -42,7 +44,7 @@ def main(args):
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert model to HuggingFace format")
     parser.add_argument("--model_size", default="8B", type=str, help="Size of the model", choices=["1B", "3B", "8B"])
-    parser.add_argument("--num_examples", default=2500, type=int, help="Number of examples", choices=[2500, 5000, 7500])
+    parser.add_argument("--train_count", default=2500, type=int, help="Number of examples", choices=[2500, 5000, 7500])
     parser.add_argument("--test_output", action="store_true", help="Test output of converted model")
     return parser.parse_args()
 
