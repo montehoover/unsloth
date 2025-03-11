@@ -199,20 +199,18 @@ def configure_logging(log_level):
 def run(args):
     logger.info(f"Loading model...")
     # Load model and tokenizer
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=args.model_name,
-        max_seq_length=args.max_seq_length,
-        dtype=args.dtype,
-        load_in_4bit=args.load_in_4bit,
-    )
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=args.model_name,
-        max_seq_length=args.max_seq_length,
-        oad_in_4bit=args.load_in_4bit, # False for LoRA 16bit
-        fast_inference=args.use_vllm, # Enable vLLM fast inference
-        max_lora_rank=args.lora_rank,
-        gpu_memory_utilization = args.gpu_memory_utilization, # Reduce if out of memory
-    )
+    try:
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=args.model_name,
+            max_seq_length=args.max_seq_length,
+            oad_in_4bit=args.load_in_4bit, # False for LoRA 16bit
+            fast_inference=args.use_vllm, # Enable vLLM fast inference
+            max_lora_rank=args.lora_rank,
+            gpu_memory_utilization = args.gpu_memory_utilization, # Reduce if out of memory
+        )
+    except OSError as e:
+        logger.error(f"Did not find model at {args.model_name}. Be sure to run scripts/convert_to_huggingface.py if you want to use a lora SFT checkpoint.")
+        raise e
 
     logger.info(f"Turning model into PEFT...")
     # Configure PEFT model
@@ -331,8 +329,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="🦥 Fine-tune your llm faster using unsloth!")
 
     model_group = parser.add_argument_group("🤖 Model Options")
-    model_group.add_argument('--model_name', type=str, default="meta-llama/meta-Llama-3.1-8B-Instruct", help="Model name to load")
-    model_group.add_argument('--max_seq_length', type=int, default=8192, help="Maximum sequence length, default is 8192. We auto support RoPE Scaling internally!")
+    # model_group.add_argument('--model_name', type=str, default="meta-llama/meta-Llama-3.1-8B-Instruct", help="Model name to load")
+    model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/checkpoints/8B_lora_2500/huggingface", help="Model name to load")
+    model_group.add_argument('--max_seq_length', type=int, default=2048, help="Maximum sequence length, default is 2048. We auto support RoPE Scaling internally!")
     model_group.add_argument('--dtype', type=str, default=None, help="Data type for model (None for auto detection)")
     model_group.add_argument('--load_in_4bit', action=argparse.BooleanOptionalAction, default=True, help="Use 4bit quantization to reduce memory usage")
     model_group.add_argument('--dataset', type=str, default="yahma/alpaca-cleaned", help="Huggingface dataset to use for training")
@@ -363,10 +362,10 @@ def parse_args():
     training_group.add_argument('--warmup_ratio', type=float, default=0.1, help="Warmup ratio, default is 0.1.")
     training_group.add_argument('--lr_scheduler_type', type=str, default="cosine", help="Learning rate scheduler type, default is 'cosine'.")
     training_group.add_argument('--num_generations', type=int, default=6, help="Number of GRPO rollouts, default is 6. Decrease if out of memory.")
-    training_group.add_argument('--max_prompt_length', type=int, default=8192, help="Maximum prompt length, default is 8192.")
+    training_group.add_argument('--max_prompt_length', type=int, default=2048, help="Maximum prompt length, default is 2048.")
     training_group.add_argument('--max_completion_length', type=int, default=512, help="Maximum completion length, default is 512.")
     training_group.add_argument('--max_grad_norm', type=float, default=0.1, help="Maximum gradient norm, default is 0.1.")
-    training_group.add_argument('--gpu_memory_utilization', type=float, default=0.6, help="GPU memory utilization, default is 0.6. Reduce if out of memory.")
+    training_group.add_argument('--gpu_memory_utilization', type=float, default=0.68, help="GPU memory utilization, default is 0.6. Reduce if out of memory.")
     training_group.add_argument('--correctness_only', action=argparse.BooleanOptionalAction, default=False, help="Use correctness reward function only.")
     training_group.add_argument('--seed', type=int, default=3407, help="Seed for reproducibility, default is 3407.")
     
