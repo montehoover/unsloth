@@ -154,6 +154,7 @@ def get_grpo_trainer(args, model, tokenizer):
         adam_beta2 = args.adam_beta2,
         weight_decay = args.weight_decay,
         warmup_ratio = args.warmup_ratio,
+        warmup_steps = args.warmup_steps,
         lr_scheduler_type = args.lr_scheduler_type,
         optim = args.optim,
         logging_steps = args.logging_steps,
