@@ -118,7 +118,6 @@ def main(args):
         grount_truth_label = extract_label(ground_truth_text)
         predicted_label = extract_xml_answer(output_text)
 
-        classification = 'null'
         if predicted_label.upper() == "PASS" and grount_truth_label.upper() == "PASS":
             classification = 'true_pass'
             logger.debug("Correct, PASS")
@@ -132,6 +131,7 @@ def main(args):
             classification = 'false_fail'
             logger.debug("False positive (labeled compliant dialogue as FAIL)")
         else:
+            classification = 'null'
             logger.debug(f"Missing expected format. Got: {output_text}")
 
         if classification == 'true_pass' or classification == 'true_fail':
@@ -166,7 +166,6 @@ def parse_args():
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/checkpoints/8B_lora_2500/huggingface", type=str, help="Model name to load")
     # parser.add_argument('--model', default="meta-llama/Llama-3.2-1B-Instruct", type=str, help="Model name to load")
     # parser.add_argument('--model', default="meta-llama/meta-Llama-3.1-8B-Instruct", type=str, help="Model name to load")
-    # parser.add_argument("--model", default=None, type=str, help="Model name to load")
     parser.add_argument("--dataset_path", default="../data/easy_train_8872.jsonl", type=str, help="Path to dataset")
     parser.add_argument("--num_examples", default=225, type=int, help="Number of examples to evaluate")
     parser.add_argument("--log_level", default=None, type=str, help="Log level")

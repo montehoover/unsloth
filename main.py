@@ -133,7 +133,7 @@ def get_compliance_examples(split = "train") -> Dataset:
 
 
 
-def get_grpo_trainer(args, model, tokenizer):
+def get_grpo_trainer(args, model, tokenizer, run_name):
     logger.info(f"Getting GRPO model thing...")
     PatchFastRL("GRPO", FastLanguageModel)
     
@@ -141,12 +141,7 @@ def get_grpo_trainer(args, model, tokenizer):
     dataset = get_compliance_examples()
 
     logger.info(f"Setting up GRPO trainer...")
-    run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    path_parts = args.model_name.split("/")
-    if path_parts[-1] == "huggingface":
-        short_model_name = path_parts[-2]
-    else:
-        short_model_name = path_parts[-1]
+
     training_args = GRPOConfig(
         use_vllm = args.use_vllm, # use vLLM for fast inference!
         learning_rate = args.learning_rate,
@@ -170,8 +165,8 @@ def get_grpo_trainer(args, model, tokenizer):
         save_steps = args.save_steps,
         max_grad_norm = args.max_grad_norm,
         report_to = args.report_to, # Can use Weights & Biases
-        output_dir = f"{args.output_dir}/{run_id}",
-        run_name = f"{short_model_name}_{run_id}",
+        output_dir = f"{args.output_dir}/{run_name}",
+        run_name = run_name,
     )
     if args.correctness_only:
         reward_funcs = [correctness_reward_func]
@@ -202,6 +197,15 @@ def configure_logging(log_level):
     )
 
 def run(args):
+    # run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"{args.learning_rate:.1e}_{args.num_generations}_{args.gradient_accumulation_steps}_{args.lora_rank}_{args.lora_alpha}_{args.max_grad_norm}_{args.warmup_steps}"
+    path_parts = args.model_name.split("/")
+    if path_parts[-1] == "huggingface":
+        short_model_name = path_parts[-2]
+    else:
+        short_model_name = path_parts[-1]
+    run_name = f"{short_model_name}_{run_name}"
+
     logger.info(f"Loading model...")
     # Load model and tokenizer
     try:
@@ -232,7 +236,7 @@ def run(args):
     )
 
     logger.info(f"Getting GRPO trainer...")
-    trainer = get_grpo_trainer(args, model, tokenizer)
+    trainer = get_grpo_trainer(args, model, tokenizer, run_name)
 
     # Train model
     logger.info(f"Training model...")
@@ -241,6 +245,7 @@ def run(args):
 
     # Save model
     if args.save_model:
+        save_path = f"{args.output_dir}/{run_name}/final_model"
         logger.info(f"Saving model...")
         # if args.quantization_method is a list, we will save the model for each quantization method
         if args.save_gguf:
@@ -248,7 +253,7 @@ def run(args):
                 for quantization_method in args.quantization:
                     print(f"Saving model with quantization method: {quantization_method}")
                     model.save_pretrained_gguf(
-                        args.save_path,
+                        save_path,
                         tokenizer,
                         quantization_method=quantization_method,
                     )
@@ -260,7 +265,7 @@ def run(args):
                         )
             else:
                 print(f"Saving model with quantization method: {args.quantization}")
-                model.save_pretrained_gguf(args.save_path, tokenizer, quantization_method=args.quantization)
+                model.save_pretrained_gguf(save_path, tokenizer, quantization_method=args.quantization)
                 if args.push_model:
                     model.push_to_hub_gguf(
                         hub_path=args.hub_path,
@@ -268,9 +273,9 @@ def run(args):
                         quantization_method=quantization_method,
                     )
         else:
-            model.save_pretrained_merged(args.save_path, tokenizer, args.save_method)
+            model.save_pretrained_merged(save_path, tokenizer, args.save_method)
             if args.push_model:
-                model.push_to_hub_merged(args.save_path, tokenizer, args.hub_token)
+                model.push_to_hub_merged(save_path, tokenizer, args.hub_token)
     else:
         print("Warning: The model is not saved!")
 
@@ -301,11 +306,11 @@ Before training:
 {output}""")
         
         # After training, with the LoRA adaptor
-        model.save_lora("outputs/grpo_saved_lora")
+        model.save_lora(save_path)
         output = model.fast_generate(
             text,
             sampling_params = sampling_params,
-            lora_request = model.load_lora("outputs/grpo_saved_lora"),
+            lora_request = model.load_lora(save_path),
         )[0].outputs[0].text
         logger.info(f"""
 #################
@@ -335,7 +340,7 @@ def parse_args():
 
     model_group = parser.add_argument_group("🤖 Model Options")
     # model_group.add_argument('--model_name', type=str, default="meta-llama/meta-Llama-3.1-8B-Instruct", help="Model name to load")
-    model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/checkpoints/8B_lora_2500/huggingface", help="Model name to load")
+    model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models_xml/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", help="Model name to load")
     model_group.add_argument('--max_seq_length', type=int, default=3512, help="Maximum sequence length, default is 2048. We auto support RoPE Scaling internally!")
     model_group.add_argument('--dtype', type=str, default=None, help="Data type for model (None for auto detection)")
     model_group.add_argument('--load_in_4bit', action=argparse.BooleanOptionalAction, default=True, help="Use 4bit quantization to reduce memory usage")
@@ -386,11 +391,11 @@ def parse_args():
 
     # Saving and pushing arguments
     save_group = parser.add_argument_group('💾 Save Model Options')
-    save_group.add_argument('--output_dir', type=str, default="outputs", help="Output directory")
+    save_group.add_argument('--output_dir', type=str, default="/fs/cml-projects/guardian_models/grpo", help="Output directory")
     save_group.add_argument('--save_model', action='store_true', help="Save the model after training")
     save_group.add_argument('--save_method', type=str, default="merged_16bit", choices=["merged_16bit", "merged_4bit", "lora"], help="Save method for the model, default is 'merged_16bit'")
     save_group.add_argument('--save_gguf', action='store_true', help="Convert the model to GGUF after training")
-    save_group.add_argument('--save_path', type=str, default="model", help="Path to save the model")
+    save_group.add_argument('--save_path', type=str, default="/fs/cml-projects/guardian_models/grpo", help="Path to save the model")
     save_group.add_argument('--quantization', type=str, default="q8_0", nargs="+",
         help="Quantization method for saving the model. common values ('f16', 'q4_k_m', 'q8_0'), Check our wiki for all quantization methods https://github.com/unslothai/unsloth/wiki#saving-to-gguf ")
 
