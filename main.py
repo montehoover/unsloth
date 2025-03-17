@@ -199,12 +199,11 @@ def configure_logging(log_level):
 def run(args):
     # run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = f"{args.learning_rate:.1e}_{args.num_generations}_{args.gradient_accumulation_steps}_{args.lora_rank}_{args.lora_alpha}_{args.max_grad_norm}_{args.warmup_steps}"
-    path_parts = args.model_name.split("/")
-    if path_parts[-1] == "huggingface":
-        short_model_name = path_parts[-2]
+    if args.model_run_name:
+        model_run_name = args.model_run_name
     else:
-        short_model_name = path_parts[-1]
-    run_name = f"{short_model_name}_{run_name}"
+        model_run_name = args.model_name.split("/")[-1]
+    run_name = f"{model_run_name}_{run_name}"
 
     logger.info(f"Loading model...")
     # Load model and tokenizer
@@ -341,6 +340,7 @@ def parse_args():
     model_group = parser.add_argument_group("🤖 Model Options")
     # model_group.add_argument('--model_name', type=str, default="meta-llama/meta-Llama-3.1-8B-Instruct", help="Model name to load")
     model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models_xml/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", help="Model name to load")
+    model_group.add_argument('--model_run_name', type=str, default=None, help="Name of the model for the run information if you don't want to use the last portion of the model path.")
     model_group.add_argument('--max_seq_length', type=int, default=3512, help="Maximum sequence length, default is 2048. We auto support RoPE Scaling internally!")
     model_group.add_argument('--dtype', type=str, default=None, help="Data type for model (None for auto detection)")
     model_group.add_argument('--load_in_4bit', action=argparse.BooleanOptionalAction, default=True, help="Use 4bit quantization to reduce memory usage")
