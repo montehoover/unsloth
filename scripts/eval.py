@@ -243,7 +243,7 @@ def main(args):
     # Dataset
     dataset = datasets.load_dataset("json", data_files={"placeholder": args.dataset_path})["placeholder"]
     n = args.num_examples if args.num_examples > 0 else len(dataset)
-    dataset = dataset.select(range(n))
+    dataset = dataset.select(range(n)).shuffle(seed=42)
     
     # Model 
     if "gpt" in args.model:
@@ -277,12 +277,13 @@ def configure_logging(log_level=None):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert model to HuggingFace format")
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/checkpoints/8B_lora_2500/huggingface_grpo", type=str, help="Model name to load")
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/checkpoints/8B_lora_2500/huggingface", type=str, help="Model name to load")
-    parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models_xml/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models_xml/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models_xml/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2-1.5B-Instruct/checkpoints/1B_lora_7500/epoch_4/huggingface_sft", type=str, help="Model name to load")
     # parser.add_argument('--model', default="meta-llama/Llama-3.2-1B-Instruct", type=str, help="Model name to load")
-    # parser.add_argument('--model', default="meta-llama/meta-Llama-3.1-8B-Instruct", type=str, help="Model name to load")
-    parser.add_argument("--dataset_path", default="../data/easy_test_225.jsonl", type=str, help="Path to dataset")
+    parser.add_argument('--model', default="meta-llama/meta-Llama-3.1-8B-Instruct", type=str, help="Model name to load")
+    # parser.add_argument("--dataset_path", default="../data/easy_test_225.jsonl", type=str, help="Path to dataset")
+    parser.add_argument("--dataset_path", default="../data/easy_train_8872.jsonl", type=str, help="Path to dataset")
     parser.add_argument("--num_examples", default=50, type=int, help="Number of examples to evaluate")
     parser.add_argument("--log_level", default=None, type=str, help="Log level")
     parser.add_argument("--use_vllm", default=True, action=argparse.BooleanOptionalAction, help="Use VLLM for generation")

@@ -119,9 +119,8 @@ def extract_label(text: str) -> str | None:
     return text.split(LABEL_DELIMITER)[1].strip()
 
 
-#TODO:  Fix the format so this and script/convert_torchtune.py match properly
-def get_compliance_examples(split = "train") -> Dataset:
-    data = load_dataset('json', data_files="data/easy_train_8872.jsonl")['train']
+def get_compliance_examples(dataset_path) -> Dataset:
+    data = load_dataset('json', data_files=dataset_path)['train']
     data = data.map(lambda x: { # type: ignore
         'prompt': [
             {'role': 'system', 'content': SYSTEM_PROMPT},
@@ -132,13 +131,12 @@ def get_compliance_examples(split = "train") -> Dataset:
     return data # type: ignore
 
 
-
 def get_grpo_trainer(args, model, tokenizer, run_name):
     logger.info(f"Getting GRPO model thing...")
     PatchFastRL("GRPO", FastLanguageModel)
     
     logger.info(f"Loading gsm8k dataset...")
-    dataset = get_compliance_examples()
+    dataset = get_compliance_examples(args.dataset)
 
     logger.info(f"Setting up GRPO trainer...")
     training_args = GRPOConfig(
@@ -210,7 +208,8 @@ def run(args):
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=args.model_name,
             max_seq_length=args.max_seq_length,
-            oad_in_4bit=args.load_in_4bit, # False for LoRA 16bit
+            load_in_4bit=args.load_in_4bit, # Both false for LoRA 16bit
+            load_in_8bit=args.load_in_8bit, # Both false for LoRA 16bit
             fast_inference=args.use_vllm, # Enable vLLM fast inference
             max_lora_rank=args.lora_rank,
             gpu_memory_utilization = args.gpu_memory_utilization, # Reduce if out of memory
@@ -344,8 +343,9 @@ def parse_args():
     model_group.add_argument('--model_run_name', type=str, default="Qwen2-1.5B_7500", help="Name of the model for the run information if you don't want to use the last portion of the model path.")
     model_group.add_argument('--max_seq_length', type=int, default=3512, help="Maximum sequence length, default is 2048. We auto support RoPE Scaling internally!")
     model_group.add_argument('--dtype', type=str, default=None, help="Data type for model (None for auto detection)")
-    model_group.add_argument('--load_in_4bit', action=argparse.BooleanOptionalAction, default=True, help="Use 4bit quantization to reduce memory usage")
-    model_group.add_argument('--dataset', type=str, default="yahma/alpaca-cleaned", help="Huggingface dataset to use for training")
+    model_group.add_argument('--load_in_4bit', action=argparse.BooleanOptionalAction, default=False, help="Use 4bit quantization to reduce memory usage")
+    model_group.add_argument('--load_in_8bit', action=argparse.BooleanOptionalAction, default=False, help="Use 8bit quantization to reduce memory usage")
+    model_group.add_argument('--dataset', type=str, default="data/easy_train_8872.jsonl", help="Huggingface dataset to use for training")
     model_group.add_argument('--use_vllm', action=argparse.BooleanOptionalAction, default=True, help="Use vLLM for fast inference in GRPO rollouts.")
 
     lora_group = parser.add_argument_group("🧠 LoRA Options", "These options are used to configure the LoRA model.")
@@ -376,7 +376,8 @@ def parse_args():
     training_group.add_argument('--max_prompt_length', type=int, default=3000, help="Maximum prompt length, default is 2048.")
     training_group.add_argument('--max_completion_length', type=int, default=512, help="Maximum completion length, default is 512.")
     training_group.add_argument('--max_grad_norm', type=float, default=0.1, help="Maximum gradient norm, default is 0.1.")
-    training_group.add_argument('--gpu_memory_utilization', type=float, default=0.7, help="GPU memory utilization, default is 0.6. Reduce if out of memory.")
+    # training_group.add_argument('--gpu_memory_utilization', type=float, default=0.7, help="GPU memory utilization. This dedicates memory for LoRA backprop and the rest is used for generations. 8B models with LoRA rank 64 work with 0.7 with 24GB VRAM.")
+    training_group.add_argument('--gpu_memory_utilization', type=float, default=0.6, help="GPU memory utilization. This dedicates memory for LoRA backprop and the rest is used for generations. 8B models with LoRA rank 64 work with 0.7 with 24GB VRAM.")
     training_group.add_argument('--correctness_only', action=argparse.BooleanOptionalAction, default=False, help="Use correctness reward function only.")
     training_group.add_argument('--seed', type=int, default=3407, help="Seed for reproducibility, default is 3407.")
     
