@@ -141,7 +141,6 @@ def get_grpo_trainer(args, model, tokenizer, run_name):
     dataset = get_compliance_examples()
 
     logger.info(f"Setting up GRPO trainer...")
-
     training_args = GRPOConfig(
         use_vllm = args.use_vllm, # use vLLM for fast inference!
         learning_rate = args.learning_rate,
@@ -339,8 +338,10 @@ def parse_args():
 
     model_group = parser.add_argument_group("🤖 Model Options")
     # model_group.add_argument('--model_name', type=str, default="meta-llama/meta-Llama-3.1-8B-Instruct", help="Model name to load")
-    model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models_xml/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", help="Model name to load")
-    model_group.add_argument('--model_run_name', type=str, default=None, help="Name of the model for the run information if you don't want to use the last portion of the model path.")
+    # model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models_xml/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", help="Model name to load")
+    model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models/Qwen2-1.5B-Instruct/checkpoints/1B_lora_7500/epoch_4/huggingface_sft", help="Model name to load")
+    # model_group.add_argument('--model_run_name', type=str, default=None, help="Name of the model for the run information if you don't want to use the last portion of the model path.")
+    model_group.add_argument('--model_run_name', type=str, default="Qwen2-1.5B_7500", help="Name of the model for the run information if you don't want to use the last portion of the model path.")
     model_group.add_argument('--max_seq_length', type=int, default=3512, help="Maximum sequence length, default is 2048. We auto support RoPE Scaling internally!")
     model_group.add_argument('--dtype', type=str, default=None, help="Data type for model (None for auto detection)")
     model_group.add_argument('--load_in_4bit', action=argparse.BooleanOptionalAction, default=True, help="Use 4bit quantization to reduce memory usage")
