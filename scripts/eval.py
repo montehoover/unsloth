@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import os
 import time
 
@@ -158,8 +159,25 @@ class ApiModelWrapper(ModelWrapper):
             raise ComplianceProjectError(f"Failed after {self.retries} retries.")
         return response['choices'][0]['message']['content']
 
+    async def aget_response(self, message):
+        response = await litellm.acompletion(
+            model=self.model_name,
+            max_tokens=self.max_new_tokens,
+            temperature=self.temperature,
+            messages=message,
+        )
+        return response['choices'][0]['message']['content']
+
+    async def gather_responses(self, messages):
+        tasks = [self.aget_response(message) for message in tqdm(messages)]
+        results = await asyncio.gather(*tasks)
+        return results
+    
     def get_responses(self, messages):
-        outputs = [self.get_response(message) for message in tqdm(messages)]
+        if self.delay is None or self.delay == 0:
+            outputs = asyncio.run(self.gather_responses(messages))
+        else:
+            outputs = [self.get_response(message) for message in tqdm(messages)]
         return outputs
 
 
@@ -265,7 +283,7 @@ def parse_args():
     # parser.add_argument('--model', default="meta-llama/Llama-3.2-1B-Instruct", type=str, help="Model name to load")
     # parser.add_argument('--model', default="meta-llama/meta-Llama-3.1-8B-Instruct", type=str, help="Model name to load")
     parser.add_argument("--dataset_path", default="../data/easy_test_225.jsonl", type=str, help="Path to dataset")
-    parser.add_argument("--num_examples", default=5, type=int, help="Number of examples to evaluate")
+    parser.add_argument("--num_examples", default=50, type=int, help="Number of examples to evaluate")
     parser.add_argument("--log_level", default=None, type=str, help="Log level")
     parser.add_argument("--use_vllm", default=True, action=argparse.BooleanOptionalAction, help="Use VLLM for generation")
     parser.add_argument("--max_model_len", default=8192, type=int, help="Maximum context length for vllm. Should be based on the space of your gpu, not the model capabilities. If this is too high for the gpu, it will tell you.")
