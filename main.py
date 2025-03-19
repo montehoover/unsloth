@@ -162,8 +162,10 @@ def get_grpo_trainer(args, model, tokenizer, run_name):
         save_steps = args.save_steps,
         max_grad_norm = args.max_grad_norm,
         report_to = args.report_to, # Can use Weights & Biases
+        resume_from_checkpoint = args.resume_from_checkpoint, # Looks in output_dir for last checkpoint
         output_dir = f"{args.output_dir}/{run_name}",
         run_name = run_name,
+
     )
     if args.correctness_only:
         reward_funcs = [correctness_reward_func]
@@ -194,7 +196,6 @@ def configure_logging(log_level):
     )
 
 def run(args):
-    # run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = f"{args.learning_rate:.1e}_{args.num_generations}_{args.gradient_accumulation_steps}_{args.lora_rank}_{args.lora_alpha}_{args.max_grad_norm}_{args.warmup_steps}"
     if args.model_run_name:
         model_run_name = args.model_run_name
@@ -237,7 +238,7 @@ def run(args):
 
     # Train model
     logger.info(f"Training model...")
-    trainer_stats = trainer.train()
+    trainer_stats = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     logger.info(f"Training complete")
 
     # Save model
@@ -276,60 +277,6 @@ def run(args):
     else:
         print("Warning: The model is not saved!")
 
-    # Test generation
-    level = logging.getLevelName(logger.getEffectiveLevel())
-    if level == "INFO" or level == "DEBUG":
-        text = tokenizer.apply_chat_template([
-            {"role" : "user", "content" : "Calculate pi."},
-        ], tokenize = False, add_generation_prompt = True)
-        sampling_params = SamplingParams(
-            temperature = 0.8,
-            top_p = 0.95,
-            max_tokens = 1024,
-        )
-
-        # Before training, without the LoRA adaptor
-        output = model.fast_generate(
-            [text],
-            sampling_params = sampling_params,
-            lora_request = None,
-        )[0].outputs[0].text
-        logger.info(f"""
-                    
-#################
-Before training:
-#################
-                    
-{output}""")
-        
-        # After training, with the LoRA adaptor
-        model.save_lora(save_path)
-        output = model.fast_generate(
-            text,
-            sampling_params = sampling_params,
-            lora_request = model.load_lora(save_path),
-        )[0].outputs[0].text
-        logger.info(f"""
-#################
-After training:
-#################
-                    
-{output}""")
-        
-        # Also test huggingface style generation
-        # model.save_pretrained_merged(args.save_path, tokenizer, args.save_method)
-        # model = AutoModelForCausalLM.from_pretrained(args.save_path, device_map="auto").eval()
-        # input_ids = tokenizer(text, return_tensors="pt").input_ids.to(model.device)
-        # output = model.generate(
-        #     input_ids,
-        #     max_new_tokens=1024,
-        #     temperature=0.8,
-        #     top_p=0.95,
-        #     return_dict_in_generate=True,
-        # )
-        # output = tokenizer.decode(output.sequences[0])
-        # logger.info(f"Huggingface generation: \n{output}")
-
 
 def parse_args():
     # Define argument parser
@@ -337,7 +284,7 @@ def parse_args():
 
     model_group = parser.add_argument_group("🤖 Model Options")
     # model_group.add_argument('--model_name', type=str, default="meta-llama/meta-Llama-3.1-8B-Instruct", help="Model name to load")
-    # model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models_xml/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", help="Model name to load")
+    # model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", help="Model name to load")
     model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models/Qwen2-1.5B-Instruct/checkpoints/1B_lora_7500/epoch_4/huggingface_sft", help="Model name to load")
     # model_group.add_argument('--model_run_name', type=str, default=None, help="Name of the model for the run information if you don't want to use the last portion of the model path.")
     model_group.add_argument('--model_run_name', type=str, default="Qwen2-1.5B_7500", help="Name of the model for the run information if you don't want to use the last portion of the model path.")
@@ -363,7 +310,7 @@ def parse_args():
     training_group.add_argument('--gradient_accumulation_steps', type=int, default=1, help="Number of gradient accumulation steps, default is 1. Increase to 4 for smoother training.")
     training_group.add_argument('--warmup_steps', type=int, default=5, help="Number of warmup steps, default is 5, not used if warmup_ratio is set.")
     training_group.add_argument('--max_steps', type=int, default=-1, help="Maximum number of training steps.")
-    training_group.add_argument('--save_steps', type=int, default=10000, help="Save steps, default is 250.")
+    training_group.add_argument('--save_steps', type=int, default=500, help="Save steps, default is 250.")
     training_group.add_argument('--num_train_epochs', type=int, default=1, help="Number of training epochs, only used if max_steps = -1.")
     training_group.add_argument('--learning_rate', type=float, default=2e-4, help="Learning rate, default is 2e-4.")
     training_group.add_argument('--optim', type=str, default="paged_adamw_8bit", help="Optimizer type.")
@@ -380,7 +327,8 @@ def parse_args():
     training_group.add_argument('--gpu_memory_utilization', type=float, default=0.6, help="GPU memory utilization. This dedicates memory for LoRA backprop and the rest is used for generations. 8B models with LoRA rank 64 work with 0.7 with 24GB VRAM.")
     training_group.add_argument('--correctness_only', action=argparse.BooleanOptionalAction, default=False, help="Use correctness reward function only.")
     training_group.add_argument('--seed', type=int, default=3407, help="Seed for reproducibility, default is 3407.")
-    
+    training_group.add_argument('--resume_from_checkpoint', action=argparse.BooleanOptionalAction, default=False, help="Resume training from a checkpoint.")
+
     # Report/Logging arguments
     report_group = parser.add_argument_group("📊 Report Options")
     report_group.add_argument('--report_to', type=str, default="wandb",

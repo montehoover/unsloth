@@ -2,6 +2,8 @@ import argparse
 import asyncio
 import os
 import time
+import json
+import uuid
 
 import litellm
 import openai
@@ -187,14 +189,15 @@ class BatchApiModelWrapper(ModelWrapper):
         self.client = openai.Client()
         self.query_interval = query_interval
         self.log_interval = log_interval
-        self.input_filename = "batch_input.jsonl"
-        self.output_filename = "batch_output.jsonl"
+        unique_id = str(uuid.uuid4())
+        self.input_filename = f"batch_input_{unique_id}.jsonl"
+        self.output_filename = f"batch_output_{unique_id}.jsonl"
 
     def create_jsonl_file(self, messages):
         requests = []
         for i, message in enumerate(messages):
             request = {
-                "custom_id": i,
+                "custom_id": str(i),
                 "method": "POST",
                 "url": "/v1/chat/completions",
                 "body": {
@@ -235,28 +238,29 @@ class BatchApiModelWrapper(ModelWrapper):
             file=open(self.input_filename, "rb"), 
             purpose="batch"
         )
+        logger.warning(f"OpenAI file object created. File ID: {openai_file_obj.id}")
         batch_job = self.client.batches.create(
             input_file_id=openai_file_obj.id,
             endpoint="/v1/chat/completions",
             completion_window="24h"
         )
-        logger.warning(f"Batch job created: {batch_job.id}")
+        logger.warning(f"Batch job created. Batch ID: {batch_job.id}")
         
         completed_batch_job = self.monitor_status_until_completion(batch_job)
         if completed_batch_job.status != "completed":
-            raise ComplianceProjectError(f"Batch job failed with status: {completed_batch_job.status}")
+            raise ComplianceProjectError(f"Batch job failed with status {completed_batch_job.status}: \n{(json.dumps(completed_batch_job.dict(), indent=4))}")
 
         # After successful completion
         result_file_id = completed_batch_job.output_file_id
         jsonl_result = self.client.files.content(result_file_id).content
         self.save_jsonl_file(jsonl_result)
         results = datasets.load_dataset("json", data_files={"placeholder": self.output_filename})["placeholder"]
-        logger.info(f"Results object format: {results.column_names}")
 
+        # Results object keys: {'custom_id' -> str, 'response' -> str, 'error' -> ?, 'id' -> ?}
         # The output json is not guaranteed to be in the same order as the input, so we check the index of each response and insert it into the correct spot in outputs
         outputs = [""] * len(messages)
         for result in results:
-            index = result["custom_id"]
+            index = int(result["custom_id"])
             outputs[index] = result["response"]["body"]["choices"][0]["message"]["content"] 
         return outputs
 
@@ -275,10 +279,10 @@ def extract_label(text: str) -> str | None:
 
 def get_stats(outputs, dataset):
     num_correct = 0
-    false_positives = 0
-    false_negatives = 0
-    nulls = 0
-    for example, output_text in zip(dataset, outputs):
+    false_positives = []
+    false_negatives = []
+    nulls = []
+    for i, (example, output_text) in enumerate(zip(dataset, outputs)):
         ground_truth_text = example[OUTPUT_FIELD]
         grount_truth_label = extract_label(ground_truth_text)
         predicted_label = extract_xml_answer(output_text)
@@ -302,11 +306,11 @@ def get_stats(outputs, dataset):
         if classification == 'true_pass' or classification == 'true_fail':
             num_correct += 1
         if classification == 'false_pass':
-            false_negatives += 1
+            false_negatives.append(i) # Track the index of wrong answers
         if classification == 'false_fail': # We consider the FAIL class to be a "positive" identification of a rule violation.
-            false_positives += 1
+            false_positives.append(i)
         if classification == 'null':
-            nulls += 1
+            nulls.append(i)
             
     accuracy = num_correct / len(dataset)
     stats = {
@@ -323,7 +327,11 @@ def main(args):
     # Dataset
     dataset = datasets.load_dataset("json", data_files={"placeholder": args.dataset_path})["placeholder"]
     n = args.num_examples if args.num_examples > 0 else len(dataset)
-    dataset = dataset.select(range(n)).shuffle(seed=42)
+    # Shuffle to ensure we get a random subset. Don't shuffle if we're using the whole thing so we can keep track of indices for frequent misclassifications.
+    if n < len(dataset):
+        dataset.shuffle(seed=42)
+    dataset = dataset.select(range(n))
+
     
     # Model 
     if "gpt" in args.model:
@@ -343,9 +351,12 @@ def main(args):
     # Evaluation
     stats = get_stats(outputs, dataset)
     logger.info(f"Accuracy: {stats["num_correct"]}/{n} ({stats["accuracy"]:.2%})")
-    logger.info(f"False Positives: {stats["false_positives"]}")
-    logger.info(f"False Negatives: {stats["false_negatives"]}")
-    logger.info(f"Missing expected label: {stats["nulls"]}")
+    logger.info(f"False Positives: {len(stats["false_positives"])}")
+    logger.info(f"False Negatives: {len(stats["false_negatives"])}")
+    logger.info(f"Missing expected label: {len(stats["nulls"])}")
+    logger.info(f"False Positive examples: {stats["false_positives"]}")
+    logger.info(f"False Negative examples: {stats["false_negatives"]}")
+    logger.info(f"Missing expected label examples: {stats["nulls"]}")
 
 
 def configure_logging(log_level=None):
@@ -360,14 +371,16 @@ def configure_logging(log_level=None):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert model to HuggingFace format")
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models_xml/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", type=str, help="Model name to load")
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models_xml/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2-1.5B-Instruct/checkpoints/1B_lora_7500/epoch_4/huggingface_sft", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2-1.5B-Instruct/huggingface_sft/7500", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
     # parser.add_argument('--model', default="meta-llama/Llama-3.2-1B-Instruct", type=str, help="Model name to load")
-    parser.add_argument('--model', default="meta-llama/meta-Llama-3.1-8B-Instruct", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="meta-llama/meta-Llama-3.1-8B-Instruct", type=str, help="Model name to load")
+    parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct", type=str, help="Model name to load")
     parser.add_argument("--dataset_path", default="../data/easy_test_225.jsonl", type=str, help="Path to dataset")
     # parser.add_argument("--dataset_path", default="../data/easy_train_8872.jsonl", type=str, help="Path to dataset")
-    parser.add_argument("--num_examples", default=5, type=int, help="Number of examples to evaluate")
+    parser.add_argument("--num_examples", default=225, type=int, help="Number of examples to evaluate")
     parser.add_argument("--log_level", default=None, type=str, help="Log level")
     parser.add_argument("--use_vllm", default=True, action=argparse.BooleanOptionalAction, help="Use VLLM for generation")
     parser.add_argument("--max_model_len", default=8192, type=int, help="Maximum context length for vllm. Should be based on the space of your gpu, not the model capabilities. If this is too high for the gpu, it will tell you.")
