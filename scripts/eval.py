@@ -180,6 +180,86 @@ class ApiModelWrapper(ModelWrapper):
             outputs = [self.get_response(message) for message in tqdm(messages)]
         return outputs
 
+class BatchApiModelWrapper(ModelWrapper):
+    def __init__(self, model_name, temperature=0.6, query_interval=60, log_interval=30):
+        self.model_name = model_name
+        self.temperature = temperature
+        self.client = openai.Client()
+        self.query_interval = query_interval
+        self.log_interval = log_interval
+        self.input_filename = "batch_input.jsonl"
+        self.output_filename = "batch_output.jsonl"
+
+    def create_jsonl_file(self, messages):
+        requests = []
+        for i, message in enumerate(messages):
+            request = {
+                "custom_id": i,
+                "method": "POST",
+                "url": "/v1/chat/completions",
+                "body": {
+                    "model": self.model_name,
+                    "temperature": 0.7,
+                    "messages": message,
+                }
+            }
+            requests.append(request)
+        dataset = datasets.Dataset.from_list(requests)
+        dataset.to_json(self.input_filename)
+
+    def save_jsonl_file(self, jsonl_result):
+        with open(self.output_filename, "wb") as f:
+            f.write(jsonl_result)
+
+    def monitor_status_until_completion(self, batch_job):
+        logger.info(f"Querying status for 24 hours, checking every {self.query_interval} seconds...")
+        hr, min, sec = 24, 60, 60
+        for i in tqdm(range(hr * min * sec // self.query_interval)):
+            batch_job = self.client.batches.retrieve(batch_job.id)
+            if batch_job.status in ["completed", "failed", "expired", "cancelled"]:
+                break
+            elif batch_job.status in ["validating", "finalizing", "cancelling"]:
+                logger.info(f"Batch job status: {batch_job.status}")
+            elif batch_job.status == "in_progress":
+                pass
+            else:
+                raise ComplianceProjectError(f"Unexpected batch job status: {batch_job.status}")
+            if i % self.log_interval == 0:
+                logger.info(f"Batch job status: {batch_job.status}")
+            time.sleep(self.query_interval)
+        return batch_job
+
+    def get_responses(self, messages):
+        self.create_jsonl_file(messages)
+        openai_file_obj = self.client.files.create(
+            file=open(self.input_filename, "rb"), 
+            purpose="batch"
+        )
+        batch_job = self.client.batches.create(
+            input_file_id=openai_file_obj.id,
+            endpoint="/v1/chat/completions",
+            completion_window="24h"
+        )
+        logger.warning(f"Batch job created: {batch_job.id}")
+        
+        completed_batch_job = self.monitor_status_until_completion(batch_job)
+        if completed_batch_job.status != "completed":
+            raise ComplianceProjectError(f"Batch job failed with status: {completed_batch_job.status}")
+
+        # After successful completion
+        result_file_id = completed_batch_job.output_file_id
+        jsonl_result = self.client.files.content(result_file_id).content
+        self.save_jsonl_file(jsonl_result)
+        results = datasets.load_dataset("json", data_files={"placeholder": self.output_filename})["placeholder"]
+        logger.info(f"Results object format: {results.column_names}")
+
+        # The output json is not guaranteed to be in the same order as the input, so we check the index of each response and insert it into the correct spot in outputs
+        outputs = [""] * len(messages)
+        for result in results:
+            index = result["custom_id"]
+            outputs[index] = result["response"]["body"]["choices"][0]["message"]["content"] 
+        return outputs
+
 
 def extract_xml_answer(text: str) -> str:
     answer = text.split("<answer>")[-1]
@@ -247,7 +327,10 @@ def main(args):
     
     # Model 
     if "gpt" in args.model:
-        model = ApiModelWrapper(args.model, args.temperature, args.api_delay, args.retries)
+        if args.use_batch_api:
+            model = BatchApiModelWrapper(args.model, args.temperature)
+        else:
+            model = ApiModelWrapper(args.model, args.temperature, args.api_delay, args.retries)
     elif args.use_vllm:
         model = VllmModelWrapper(args.model, args.temperature, args.top_k, args.max_new_tokens)
     else:
@@ -282,9 +365,9 @@ def parse_args():
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2-1.5B-Instruct/checkpoints/1B_lora_7500/epoch_4/huggingface_sft", type=str, help="Model name to load")
     # parser.add_argument('--model', default="meta-llama/Llama-3.2-1B-Instruct", type=str, help="Model name to load")
     parser.add_argument('--model', default="meta-llama/meta-Llama-3.1-8B-Instruct", type=str, help="Model name to load")
-    # parser.add_argument("--dataset_path", default="../data/easy_test_225.jsonl", type=str, help="Path to dataset")
-    parser.add_argument("--dataset_path", default="../data/easy_train_8872.jsonl", type=str, help="Path to dataset")
-    parser.add_argument("--num_examples", default=50, type=int, help="Number of examples to evaluate")
+    parser.add_argument("--dataset_path", default="../data/easy_test_225.jsonl", type=str, help="Path to dataset")
+    # parser.add_argument("--dataset_path", default="../data/easy_train_8872.jsonl", type=str, help="Path to dataset")
+    parser.add_argument("--num_examples", default=5, type=int, help="Number of examples to evaluate")
     parser.add_argument("--log_level", default=None, type=str, help="Log level")
     parser.add_argument("--use_vllm", default=True, action=argparse.BooleanOptionalAction, help="Use VLLM for generation")
     parser.add_argument("--max_model_len", default=8192, type=int, help="Maximum context length for vllm. Should be based on the space of your gpu, not the model capabilities. If this is too high for the gpu, it will tell you.")
@@ -295,6 +378,7 @@ def parse_args():
     # API stuff
     parser.add_argument("--api_delay", default=None, type=float, help="Minimum delay between API calls")
     parser.add_argument("--retries", default=3, type=int, help="Number of retries for API calls")
+    parser.add_argument("--use_batch_api", default=False, action=argparse.BooleanOptionalAction, help="Use batch call for API models")
 
     return parser.parse_args()
 
