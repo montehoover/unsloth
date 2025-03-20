@@ -292,7 +292,7 @@ def parse_args():
     model_group.add_argument('--dtype', type=str, default=None, help="Data type for model (None for auto detection)")
     model_group.add_argument('--load_in_4bit', action=argparse.BooleanOptionalAction, default=False, help="Use 4bit quantization to reduce memory usage")
     model_group.add_argument('--load_in_8bit', action=argparse.BooleanOptionalAction, default=False, help="Use 8bit quantization to reduce memory usage")
-    model_group.add_argument('--dataset', type=str, default="data/easy_train_8872.jsonl", help="Huggingface dataset to use for training")
+    model_group.add_argument('--dataset', type=str, default="data/easy_train_10637.jsonl", help="Huggingface dataset to use for training")
     model_group.add_argument('--use_vllm', action=argparse.BooleanOptionalAction, default=True, help="Use vLLM for fast inference in GRPO rollouts.")
 
     lora_group = parser.add_argument_group("🧠 LoRA Options", "These options are used to configure the LoRA model.")
