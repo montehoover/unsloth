@@ -137,7 +137,7 @@ def main(args):
             file_path = preprocess_dataset(huggingface_dataset, subset, split, size=args.train_size, data_dir=args.data_dir)
             file_paths[f"{subset}_{split}"] = file_path
 
-    if args.combine_train_val:
+    if args.extra_examples:
         train_file_path = file_paths["easy_train"]
         val_file_path = file_paths["easy_validation"]
         
@@ -158,7 +158,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", default="data", type=str)
     parser.add_argument("--train_size", default=10000, type=int)
-    parser.add_argument("--combine_train_val", default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument("--extra_examples", default=True, action=argparse.BooleanOptionalAction)
     return parser.parse_args()
 
 
