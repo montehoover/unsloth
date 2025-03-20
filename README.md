@@ -29,7 +29,7 @@
 
 3. Run GRPO on compliance dataset. Use convert_unsloth.py to preprocess dataset first.
    ```
-   python scripts/convert_unsloth.py
+   python scripts/convert_unsloth.py --extra_examples
    python main.py
    ```
 
