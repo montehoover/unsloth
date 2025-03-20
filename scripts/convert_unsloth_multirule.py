@@ -2,12 +2,34 @@ import argparse
 import ast
 import datasets
 
+"""
+Convert a Compliance dataset in the format:
+{
+    rules: List[str],        # numbered 
+    dialogue: str, 
+    discussions: List[str],  # numbered
+    explanations: List[str], # numbered 
+    labels: List[str]}       # numbered
+}
+
+to an eval-friendly dataset in the format:
+{
+    input: str,
+
+"""
+
 
 # These constants should match the constants at the top of main.py
 # TODO: Move these constants to a shared file
 INPUT_FIELD = "question"
 OUTPUT_FIELD = "answer"
 LABEL_DELIMITER = "\nCOMPLIANCE OUTPUT:"
+
+INPUT_FIELD = "input"
+OUTPUT_LABEL_FIELD = "label"
+OUTPUT_RULES_FIELD = "rules_broken"
+OUTPUT_LINE_CITED_FIELD = "line"
+OUTPUT_EXPLANATION_FIELD = "explanation"
 
 
 def clean_rule(rule):
@@ -50,9 +72,15 @@ def preprocess_dataset(dataset_path, subset=None, split=None, size=None, local=F
     print(f"Examples in {subset} {split}: {len(dataset)}")
 
     examples = []
+    counter = 0
     for row in dataset:
         # Get rules
         rules = row['rules']
+        print(f"Rules: {rules}")
+        counter += 1
+        if counter > 5:
+            break
+        
         # Get turns
         dialogue = row['dialogue']
         delimiter = "'User':"
@@ -102,6 +130,8 @@ Conversation:
                     raise e
                 
                 label = parse_string_list(labels[i])[j]
+                # if label == "FAIL":
+
                 example[OUTPUT_FIELD] = f"{discussion} {explanation} {LABEL_DELIMITER} {label}"
                 examples.append(example)
 
@@ -159,6 +189,7 @@ def parse_args():
     parser.add_argument("--data_dir", default="data", type=str)
     parser.add_argument("--train_size", default=10000, type=int)
     parser.add_argument("--combine_train_val", default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument("--multi_rule", default=False, action=argparse.BooleanOptionalAction)
     return parser.parse_args()
 
 
