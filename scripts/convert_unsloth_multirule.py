@@ -1,6 +1,8 @@
 import argparse
 import ast
+import json
 import datasets
+from tqdm import tqdm
 
 """
 Convert a Compliance dataset in the format:
@@ -15,22 +17,29 @@ Convert a Compliance dataset in the format:
 to an eval-friendly dataset in the format:
 {
     input: str,
-
+    allpass_label: str,
+    rules_violated: List[int],
+    violation_lines: List[str],
+    explanations: List[str]
+}
 """
-
 
 # These constants should match the constants at the top of main.py
 # TODO: Move these constants to a shared file
 INPUT_FIELD = "question"
-OUTPUT_FIELD = "answer"
-LABEL_DELIMITER = "\nCOMPLIANCE OUTPUT:"
+OUTPUT_LABEL_FIELD = "answer"
+OUTPUT_RULES_FIELD = "rules_violated"
+OUTPUT_VIOLATION_LINES_FIELD = "violation_lines"
+OUTPUT_EXPLANATIONS_FIELD = "explanations"
 
-INPUT_FIELD = "input"
-OUTPUT_LABEL_FIELD = "label"
-OUTPUT_RULES_FIELD = "rules_broken"
-OUTPUT_LINE_CITED_FIELD = "line"
-OUTPUT_EXPLANATION_FIELD = "explanation"
+COT_OPENING = "\n<reasoning>"
+COT_CLOSING = "\n</reasoning>"
+LABEL_OPENING = "\n<answer>"
+LABEL_CLOSING = "\n</answer>"
 
+
+class ComplianceProjectError(ValueError):
+    pass
 
 def clean_rule(rule):
     # Looking for 1. or 2. etc.
@@ -40,7 +49,6 @@ def clean_rule(rule):
     else:
         rule = rule.strip()
     return rule
-
 
 def clean_explanation(explanation):
     # Looking for "Turn x: "
@@ -56,97 +64,104 @@ def parse_string_list_problem(string_list):
         native_list = string_list.split("Turn ")[1:]
     return native_list
 
-
 def parse_string_list(string_list):
     # Format: "1. ['PASS', 'PASS', 'PASS']\n"
     string_list = string_list.split(". ", 1)[1].strip()
     native_list = ast.literal_eval(string_list)
     return native_list
 
-
 def preprocess_dataset(dataset_path, subset=None, split=None, size=None, local=False, data_dir="data"):
     if local:
-        dataset = datasets.load_dataset('json', data_files=dataset_path)['train']
+        dataset = datasets.load_dataset("json", data_files={"placeholder": dataset_path})["placeholder"]
     else:
         dataset = datasets.load_dataset(dataset_path, subset, split=split)
     print(f"Examples in {subset} {split}: {len(dataset)}")
 
     examples = []
-    counter = 0
-    for row in dataset:
-        # Get rules
-        rules = row['rules']
-        print(f"Rules: {rules}")
-        counter += 1
-        if counter > 5:
-            break
+    for row_index, row in tqdm(enumerate(dataset)):
+        ##################
+        # Setup
+        ##################
+        example ={}
+        rules = row["rules"]
+        dialogue = row["dialogue"]
+        labels = row["labels"]
+        explanations = row["explanations"]
+
+        # labels = row["labels"]
+        # print(labels)
+        # print(type(labels))
+        # print(type(labels[0]))
+        # print(len(labels))
+        # print(len(labels[0]))
+
+        cleaned_rules = []
+        cleaned_labels = []
+        cleaned_explanations = []
+        for i in range(len(rules)):
+            cleaned_rules.append(clean_rule(rules[i]))
+            cleaned_labels.append(parse_string_list(labels[i]))
+            cleaned_explanations.append([clean_explanation(explanation) for explanation in parse_string_list(explanations[i])])
+
+        delimiters = ["'User':", """"User":"""]
+        for delimiter in delimiters:
+            if delimiter in dialogue:
+                dialogue_preamble = dialogue.split(delimiter, 1)[0]
+                main_dialogue = dialogue.split(delimiter, 1)[1]
+                dialogue_turns = [f"{delimiter}{item}" for item in main_dialogue.split(delimiter) if item]
+                dialogue_turns[0] = dialogue_preamble + dialogue_turns[0]
+                break
+
+        num_rules = len(cleaned_rules)
+        num_turns = len(dialogue_turns)
+        if num_turns != len(cleaned_labels[0]):
+            raise ComplianceProjectError(f"Example {row_index}: Number of dialogue turns ({len(dialogue_turns)}) does not match number of turns in labels ({len(cleaned_labels[0])}) \nDialogue: {json.dumps(dialogue_turns, indent=4)} \nLabels: {cleaned_labels[0]}")
         
-        # Get turns
-        dialogue = row['dialogue']
-        delimiter = "'User':"
-        dialogue_turns = [f"{delimiter}{item}" for item in dialogue.split(delimiter) if item]
-        # Get discussions, explanations, and labels
-        discussions = row['discussions'] # List of strings
-        explanations = row['explanations'] # List of strings
+        ##################
+        # Input
+        ##################
+        enumerated_rules = '\n'.join(f"{i+1}. {rule}" for i, rule in enumerate(cleaned_rules))
+        example[INPUT_FIELD] = f'''
+Rules agent must follow:
+{enumerated_rules}
+
+Transcript:
+{dialogue}
+'''     
+        ##################
+        # Output        
+        ##################
+        allpass_label = "PASS"
+        violated_rules = []
+        violation_lines = []
+        violation_explanations = []
+
+        for i in range(num_rules):
+            for j in range(num_turns):
+                if cleaned_labels[i][j] == "FAIL":
+                    allpass_label = "FAIL"
+                    violated_rules.append(i+1)
+                    violation_lines.append(dialogue_turns[j])
+                    violation_explanations.append(cleaned_explanations[i][j])
+                    break # We capture the first violation of a given rule and then move to the next rule
         
-        labels = row['labels'] # List of strings
+        example[OUTPUT_LABEL_FIELD] = allpass_label
+        example[OUTPUT_RULES_FIELD] = violated_rules
+        example[OUTPUT_VIOLATION_LINES_FIELD] = violation_lines
+        example[OUTPUT_EXPLANATIONS_FIELD] = violation_explanations
+        examples.append(example)
 
-        for i, rule in enumerate(rules):
-            for j in range(len(dialogue_turns)):
-                example = {}
-                dialogue_subset = "".join(dialogue_turns[:j+1])
-                # Construct input
-                try:
-                    rule = clean_rule(rule)
-                except Exception as e:
-                    print(f"BAD RULE: {rule}")
-                    raise e
-                example[INPUT_FIELD] = f'''
-Rule Agent must follow:
-{rule}
+    processed_dataset = datasets.Dataset.from_list(examples)
+    processed_dataset = processed_dataset.shuffle(seed=42)
 
-Conversation:
-{dialogue_subset}
-'''
-                # Construct ouput
-                try:
-                    if subset == "hard" and split == "test":
-                        discussion = parse_string_list_problem(discussions[i])[j]
-                    else:
-                        discussion = parse_string_list(discussions[i])[j] # Starts with "Turn x: "
-                    discussion = clean_explanation(discussion)
-                except Exception as e:
-                    print(f"BAD DISCUSSION: {discussions}")
-                    raise e
-                
-                try:
-                    if subset == "hard" and split == "test":
-                        explanation = parse_string_list_problem(explanations[i])[j]
-                    else:
-                        explanation = parse_string_list(explanations[i])[j] # Starts with "Turn x: "
-                    explanation = clean_explanation(explanation)
-                except Exception as e:
-                    print(f"BAD EXPLANATION: {explanations}")
-                    raise e
-                
-                label = parse_string_list(labels[i])[j]
-                # if label == "FAIL":
-
-                example[OUTPUT_FIELD] = f"{discussion} {explanation} {LABEL_DELIMITER} {label}"
-                examples.append(example)
-
-
-    torchtune_dataset = datasets.Dataset.from_list(examples)
-    torchtune_dataset = torchtune_dataset.shuffle(seed=42)
-
-    if size is None or len(torchtune_dataset) < size:
-        size = len(torchtune_dataset)
-    torchtune_dataset = torchtune_dataset.select(range(size))
+    if size is None or len(processed_dataset) < size:
+        size = len(processed_dataset)
+    processed_dataset = processed_dataset.select(range(size))
 
     file_path = f"{data_dir}/{subset}_{split}_{size}.jsonl"
 
-    torchtune_dataset.to_json(file_path, orient='records', lines=True, indent=None)
-    print(f"Examples in dataset preprocessed for TorchTune: {size}")
+    processed_dataset.to_json(file_path)
+    print(f"Examples in processed dataset: {size}")
     print(f"Saved to {file_path}")
     return file_path
 
@@ -167,12 +182,12 @@ def main(args):
             file_path = preprocess_dataset(huggingface_dataset, subset, split, size=args.train_size, data_dir=args.data_dir)
             file_paths[f"{subset}_{split}"] = file_path
 
-    if args.combine_train_val:
+    if args.extra_examples:
         train_file_path = file_paths["easy_train"]
         val_file_path = file_paths["easy_validation"]
         
-        train_dataset = datasets.load_dataset("json", data_files={"placeholder": train_file_path})["placeholder"]
-        val_dataset = datasets.load_dataset("json", data_files={"placeholder": val_file_path})["placeholder"]
+        train_dataset = datasets.load_dataset("json", data_files={"_": train_file_path}, split="_")
+        val_dataset = datasets.load_dataset("json", data_files={"_": val_file_path}, split="_")
         
         combined_len = len(train_dataset) + len(val_dataset)
         combined_file_path = f"{args.data_dir}/easy_train_{combined_len}.jsonl"
@@ -183,13 +198,11 @@ def main(args):
         print(f"Combined easy train and validation datasets saved to {combined_file_path}")
         
 
-
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", default="data", type=str)
+    parser.add_argument("--data_dir", default="data/multi_rule", type=str)
     parser.add_argument("--train_size", default=10000, type=int)
-    parser.add_argument("--combine_train_val", default=True, action=argparse.BooleanOptionalAction)
-    parser.add_argument("--multi_rule", default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument("--extra_examples", default=True, action=argparse.BooleanOptionalAction)
     return parser.parse_args()
 
 
