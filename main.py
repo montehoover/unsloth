@@ -19,7 +19,11 @@ os.environ["WANDB_PROJECT"] = "grpo-compliance"
 # TODO: Move these constants to a shared file
 INPUT_FIELD = "question"
 OUTPUT_FIELD = "answer"
-LABEL_DELIMITER = "\nCOMPLIANCE OUTPUT:"
+
+COT_OPENING = "\n<reasoning>"
+COT_CLOSING = "\n</reasoning>"
+LABEL_OPENING = "\n<answer>"
+LABEL_CLOSING = "\n</answer>"
 
 SYSTEM_PROMPT = """
 You are a guardian model evaluating the compliance of a chatbot agent to various rules. 
@@ -109,14 +113,14 @@ def xmlcount_reward_func(completions, **kwargs) -> list[float]:
 
 
 def extract_xml_answer(text: str) -> str:
-    answer = text.split("<answer>")[-1]
-    answer = answer.split("</answer>")[0]
+    answer = text.split(LABEL_OPENING.strip())[-1]
+    answer = answer.split(LABEL_CLOSING.strip())[0]
     return answer.strip()
 
-def extract_label(text: str) -> str | None:
-    if LABEL_DELIMITER not in text:
-        return None
-    return text.split(LABEL_DELIMITER)[1].strip()
+# def extract_label(text: str) -> str | None:
+#     if LABEL_DELIMITER not in text:
+#         return None
+#     return text.split(LABEL_DELIMITER)[1].strip()
 
 
 def get_compliance_examples(dataset_path) -> Dataset:
@@ -126,7 +130,7 @@ def get_compliance_examples(dataset_path) -> Dataset:
             {'role': 'system', 'content': SYSTEM_PROMPT},
             {'role': 'user', 'content': x[INPUT_FIELD]}
         ],
-        OUTPUT_FIELD: extract_label(x[OUTPUT_FIELD])
+        OUTPUT_FIELD: extract_xml_answer(x[OUTPUT_FIELD])
     }) # type: ignore
     return data # type: ignore
 
@@ -285,7 +289,7 @@ def parse_args():
     model_group = parser.add_argument_group("🤖 Model Options")
     # model_group.add_argument('--model_name', type=str, default="meta-llama/meta-Llama-3.1-8B-Instruct", help="Model name to load")
     # model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", help="Model name to load")
-    model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models/Qwen2-1.5B-Instruct/checkpoints/1B_lora_7500/epoch_4/huggingface_sft", help="Model name to load")
+    model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models/Qwen2-1.5B-Instruct/huggingface_sft/7500", help="Model name to load")
     # model_group.add_argument('--model_run_name', type=str, default=None, help="Name of the model for the run information if you don't want to use the last portion of the model path.")
     model_group.add_argument('--model_run_name', type=str, default="Qwen2-1.5B_7500", help="Name of the model for the run information if you don't want to use the last portion of the model path.")
     model_group.add_argument('--max_seq_length', type=int, default=3512, help="Maximum sequence length, default is 2048. We auto support RoPE Scaling internally!")

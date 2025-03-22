@@ -21,7 +21,11 @@ logger = logging.getLogger(__name__)
 # TODO: Move these constants to a shared file
 INPUT_FIELD = "question"
 OUTPUT_FIELD = "answer"
-LABEL_DELIMITER = "\nCOMPLIANCE OUTPUT:"
+
+COT_OPENING = "\n<reasoning>"
+COT_CLOSING = "\n</reasoning>"
+LABEL_OPENING = "\n<answer>"
+LABEL_CLOSING = "\n</answer>"
 
 # PROMPT = """"You are a guardian model evaluating the compliance of a chatbot agent to various rules. 
 # You will be given a rule that the agent must follow, along with a conversation between the agent and a user. 
@@ -266,15 +270,15 @@ class BatchApiModelWrapper(ModelWrapper):
 
 
 def extract_xml_answer(text: str) -> str:
-    answer = text.split("<answer>")[-1]
-    answer = answer.split("</answer>")[0]
+    answer = text.split(LABEL_OPENING.strip())[-1]
+    answer = answer.split(LABEL_CLOSING.strip())[0]
     return answer.strip()
 
 
-def extract_label(text: str) -> str | None:
-    if LABEL_DELIMITER not in text:
-        return None
-    return text.split(LABEL_DELIMITER)[1].strip()
+# def extract_label(text: str) -> str | None:
+#     if LABEL_DELIMITER not in text:
+#         return None
+#     return text.split(LABEL_DELIMITER)[1].strip()
 
 
 def get_stats(outputs, dataset):
@@ -284,7 +288,7 @@ def get_stats(outputs, dataset):
     nulls = []
     for i, (example, output_text) in enumerate(zip(dataset, outputs)):
         ground_truth_text = example[OUTPUT_FIELD]
-        grount_truth_label = extract_label(ground_truth_text)
+        grount_truth_label = extract_xml_answer(ground_truth_text)
         predicted_label = extract_xml_answer(output_text)
 
         if predicted_label.upper() == "PASS" and grount_truth_label.upper() == "PASS":
@@ -397,4 +401,5 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     configure_logging(args.log_level)
+    logger.info(json.dumps(vars(args), indent=4))
     main(args)

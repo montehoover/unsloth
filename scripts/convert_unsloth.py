@@ -7,7 +7,12 @@ import datasets
 # TODO: Move these constants to a shared file
 INPUT_FIELD = "question"
 OUTPUT_FIELD = "answer"
-LABEL_DELIMITER = "\nCOMPLIANCE OUTPUT:"
+
+# These constants should match with the system prompt in the config file and with the GRPO constants in Unsloth
+COT_OPENING = "\n<reasoning>"
+COT_CLOSING = "\n</reasoning>"
+LABEL_OPENING = "\n<answer>"
+LABEL_CLOSING = "\n</answer>"
 
 
 def clean_rule(rule):
@@ -102,7 +107,7 @@ Conversation:
                     raise e
                 
                 label = parse_string_list(labels[i])[j]
-                example[OUTPUT_FIELD] = f"{discussion} {explanation} {LABEL_DELIMITER} {label}"
+                example[OUTPUT_FIELD] = f"{COT_OPENING} {discussion} {explanation} {COT_CLOSING} {LABEL_OPENING} {label} {LABEL_CLOSING}"
                 examples.append(example)
 
 
