@@ -1,6 +1,7 @@
 import argparse
 import ast
 import datasets
+import json
 
 
 # These constants should match the constants at the top of main.py
@@ -14,6 +15,8 @@ COT_CLOSING = "\n</reasoning>"
 LABEL_OPENING = "\n<answer>"
 LABEL_CLOSING = "\n</answer>"
 
+class ComplianceProjectError(ValueError):
+    pass
 
 def clean_rule(rule):
     # Looking for 1. or 2. etc.
@@ -46,7 +49,24 @@ def parse_string_list(string_list):
     native_list = ast.literal_eval(string_list)
     return native_list
 
-
+def get_dialogue_turns(dialogue, expected_turns, example_index=-1):
+    delimiters = ["'User':", """"User":"""]
+    dialogue_turns = []
+    for delimiter in delimiters:
+        if delimiter in dialogue:
+            dialogue_preamble = dialogue.split(delimiter, 1)[0]
+            main_dialogue = dialogue.split(delimiter, 1)[1]
+            dialogue_turns = [f"{delimiter}{item}" for item in main_dialogue.split(delimiter) if item]
+            dialogue_turns[0] = dialogue_preamble + dialogue_turns[0]
+            break
+    if len(dialogue_turns) != expected_turns:
+        raise ComplianceProjectError(f"""
+            Example {example_index}: Number of dialogue turns ({len(dialogue_turns)}) does not match number of turns in labels ({expected_turns}).
+            Delimiters: {delimiters}
+            Dialogue: {json.dumps(dialogue_turns, indent=4)}
+            """)
+    return dialogue_turns
+    
 def preprocess_dataset(dataset_path, subset=None, split=None, size=None, local=False, data_dir="data"):
     if local:
         dataset = datasets.load_dataset('json', data_files=dataset_path)['train']
@@ -55,19 +75,34 @@ def preprocess_dataset(dataset_path, subset=None, split=None, size=None, local=F
     print(f"Examples in {subset} {split}: {len(dataset)}")
 
     examples = []
-    for row in dataset:
-        # Get rules
-        rules = row['rules']
-        # Get turns
-        dialogue = row['dialogue']
-        delimiter = "'User':"
-        dialogue_turns = [f"{delimiter}{item}" for item in dialogue.split(delimiter) if item]
-        # Get discussions, explanations, and labels
-        discussions = row['discussions'] # List of strings
-        explanations = row['explanations'] # List of strings
-        
-        labels = row['labels'] # List of strings
+    for row_index, row in enumerate(dataset):
+                ##################
+        # Setup
+        ##################
+        example ={}
+        rules = row["rules"]
+        dialogue = row["dialogue"]
+        labels = row["labels"]
+        explanations = row["explanations"]
+        discussions = row["discussions"]
 
+        cleaned_rules = []
+        cleaned_labels = []
+        cleaned_explanations = []
+        cleaned_discussions = []
+        for i in range(len(rules)):
+            cleaned_rules.append(clean_rule(rules[i]))
+            cleaned_labels.append(parse_string_list(labels[i]))
+            cleaned_explanations.append([clean_explanation(explanation) for explanation in parse_string_list(explanations[i])])
+            cleaned_discussions.append([clean_explanation(discussion) for discussion in parse_string_list(discussions[i])])
+
+        num_rules = len(cleaned_rules)
+        num_turns = len(cleaned_labels[0])
+        dialogue_turns = get_dialogue_turns(dialogue, expected_turns=num_turns, example_index=row_index)
+
+        ##################
+        # Input
+        ##################
         for i, rule in enumerate(rules):
             for j in range(len(dialogue_turns)):
                 example = {}
@@ -76,7 +111,7 @@ def preprocess_dataset(dataset_path, subset=None, split=None, size=None, local=F
                 try:
                     rule = clean_rule(rule)
                 except Exception as e:
-                    print(f"BAD RULE: {rule}")
+                    print(f"BAD RULE in example {row_index}: {rule}")
                     raise e
                 example[INPUT_FIELD] = f'''
 Rule Agent must follow:
@@ -93,7 +128,7 @@ Conversation:
                         discussion = parse_string_list(discussions[i])[j] # Starts with "Turn x: "
                     discussion = clean_explanation(discussion)
                 except Exception as e:
-                    print(f"BAD DISCUSSION: {discussions}")
+                    print(f"BAD DISCUSSION in example {row_index}: {discussions}")
                     raise e
                 
                 try:
@@ -103,13 +138,12 @@ Conversation:
                         explanation = parse_string_list(explanations[i])[j] # Starts with "Turn x: "
                     explanation = clean_explanation(explanation)
                 except Exception as e:
-                    print(f"BAD EXPLANATION: {explanations}")
+                    print(f"BAD EXPLANATION in example {row_index}: {explanations}")
                     raise e
                 
                 label = parse_string_list(labels[i])[j]
                 example[OUTPUT_FIELD] = f"{COT_OPENING} {discussion} {explanation} {COT_CLOSING} {LABEL_OPENING} {label} {LABEL_CLOSING}"
                 examples.append(example)
-
 
     torchtune_dataset = datasets.Dataset.from_list(examples)
     torchtune_dataset = torchtune_dataset.shuffle(seed=42)
