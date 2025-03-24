@@ -10,7 +10,8 @@ from tqdm import tqdm
 
 import logging
 logger = logging.getLogger(__name__)
-
+from vllm import LLM, SamplingParams
+from time import time_ns
 
 # Custom error class that is easy to catch and handle
 class ComplianceProjectError(ValueError):
@@ -75,7 +76,6 @@ class HfModelWrapper(LocalModelWrapper):
 
 class VllmModelWrapper(LocalModelWrapper):
     def __init__(self, model_name, temperature=0.6, top_k=300, max_new_tokens=1000, max_model_len=8192):
-        from vllm import LLM, SamplingParams
 
         super().__init__(model_name, temperature, top_k, max_new_tokens)
         self.model = LLM(model_name, max_model_len=max_model_len)
@@ -84,7 +84,8 @@ class VllmModelWrapper(LocalModelWrapper):
         sampling_params = SamplingParams(
             max_tokens=self.max_new_tokens,
             temperature=self.temperature,
-            top_k=self.top_k
+            top_k=self.top_k,
+            seed=time_ns()
         )
         # responses -> List[obj(prompt, outputs -> List[obj(text, ???)])]
         responses = self.model.generate(messages, sampling_params=sampling_params)
