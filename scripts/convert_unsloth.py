@@ -27,21 +27,10 @@ def clean_rule(rule):
         rule = rule.strip()
     return rule
 
-
 def clean_explanation(explanation):
     # Looking for "Turn x: "
     explanation = explanation.split(": ", 1)[1].strip()
     return explanation
-
-def parse_string_list_problem(string_list):
-    # Format: "1. ['Turn 1. ...', 'Turn 2. ...', ...]\n"
-    string_list = string_list.split(". ", 1)[1].strip()
-    turn_count = string_list.count("Turn ")
-    native_list = ast.literal_eval(string_list)
-    if len(native_list) > turn_count:
-        native_list = string_list.split("Turn ")[1:]
-    return native_list
-
 
 def parse_string_list(string_list):
     # Format: "1. ['PASS', 'PASS', 'PASS']\n"
@@ -76,10 +65,9 @@ def preprocess_dataset(dataset_path, subset=None, split=None, size=None, local=F
 
     examples = []
     for row_index, row in enumerate(dataset):
-                ##################
+        ##################
         # Setup
         ##################
-        example ={}
         rules = row["rules"]
         dialogue = row["dialogue"]
         labels = row["labels"]
@@ -100,19 +88,15 @@ def preprocess_dataset(dataset_path, subset=None, split=None, size=None, local=F
         num_turns = len(cleaned_labels[0])
         dialogue_turns = get_dialogue_turns(dialogue, expected_turns=num_turns, example_index=row_index)
 
-        ##################
-        # Input
-        ##################
-        for i, rule in enumerate(rules):
-            for j in range(len(dialogue_turns)):
+        for i in range(num_rules):
+            for j in range(num_turns):
                 example = {}
+
+                ##################
+                # Input
+                ##################
+                rule = cleaned_rules[i]
                 dialogue_subset = "".join(dialogue_turns[:j+1])
-                # Construct input
-                try:
-                    rule = clean_rule(rule)
-                except Exception as e:
-                    print(f"BAD RULE in example {row_index}: {rule}")
-                    raise e
                 example[INPUT_FIELD] = f'''
 Rule Agent must follow:
 {rule}
@@ -120,28 +104,12 @@ Rule Agent must follow:
 Conversation:
 {dialogue_subset}
 '''
-                # Construct ouput
-                try:
-                    if subset == "hard" and split == "test":
-                        discussion = parse_string_list_problem(discussions[i])[j]
-                    else:
-                        discussion = parse_string_list(discussions[i])[j] # Starts with "Turn x: "
-                    discussion = clean_explanation(discussion)
-                except Exception as e:
-                    print(f"BAD DISCUSSION in example {row_index}: {discussions}")
-                    raise e
-                
-                try:
-                    if subset == "hard" and split == "test":
-                        explanation = parse_string_list_problem(explanations[i])[j]
-                    else:
-                        explanation = parse_string_list(explanations[i])[j] # Starts with "Turn x: "
-                    explanation = clean_explanation(explanation)
-                except Exception as e:
-                    print(f"BAD EXPLANATION in example {row_index}: {explanations}")
-                    raise e
-                
-                label = parse_string_list(labels[i])[j]
+                ##################
+                # Output        
+                ##################
+                discussion = cleaned_discussions[i][j]
+                explanation = cleaned_explanations[i][j]
+                label = cleaned_labels[i][j]
                 example[OUTPUT_FIELD] = f"{COT_OPENING} {discussion} {explanation} {COT_CLOSING} {LABEL_OPENING} {label} {LABEL_CLOSING}"
                 examples.append(example)
 
