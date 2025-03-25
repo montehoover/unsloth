@@ -3,6 +3,7 @@ import os
 import json
 import datasets
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
+import numpy as np
 
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
@@ -110,17 +111,42 @@ def main(args):
     
     # Generation
     messages = [model.apply_chat_template(SYSTEM_PROMPT, x[INPUT_FIELD]) for x in dataset]
-    outputs = model.get_responses(messages)
 
-    # Evaluation
-    stats = get_stats(outputs, dataset)
-    logger.info(f"Accuracy: {stats["num_correct"]}/{n} ({stats["accuracy"]:.2%})")
-    logger.info(f"False Positives: {len(stats["false_positives"])}")
-    logger.info(f"False Negatives: {len(stats["false_negatives"])}")
-    logger.info(f"Missing expected label: {len(stats["nulls"])}")
-    logger.info(f"False Positive examples: {stats["false_positives"]}")
-    logger.info(f"False Negative examples: {stats["false_negatives"]}")
-    logger.info(f"Missing expected label examples: {stats["nulls"]}")
+    accuracies = []
+    num_correct = 0
+    false_positives = 0
+    false_negatives = 0
+    missing_labels = 0
+    false_positive_examples = []
+    false_negative_examples = []
+    missing_label_examples = []
+    for _ in range(args.sample_size):
+        outputs = model.get_responses(messages)
+
+        # Evaluation
+        stats = get_stats(outputs, dataset)
+
+        accuracies.append(stats["accuracy"])
+        num_correct += stats["num_correct"]
+
+        false_positives += len(stats["false_positives"])
+        false_negatives += len(stats["false_negatives"])
+        missing_labels += len(stats["nulls"])
+
+        false_positive_examples.extend(stats["false_positives"])
+        false_negative_examples.extend(stats["false_negatives"])
+        missing_label_examples.extend(stats["nulls"])
+
+    logger.info(f"Raw accuracy per sample: {accuracies}")
+    accuracies = np.array(accuracies)
+    logger.info(f"Accuracy: {num_correct / args.sample_size:.2f}/{n} ({accuracies.mean():.2%})")
+    logger.info(f"Accuracy standard deviation = {accuracies.std():.2%}")
+    logger.info(f"False Positives: {false_positives} ({false_positives / args.sample_size:0.2f} per sample)")
+    logger.info(f"False Negatives: {false_negatives} ({false_negatives / args.sample_size:0.2f} per sample)")
+    logger.info(f"Missing expected label: {missing_labels} ({missing_labels  / args.sample_size:0.2f} per sample)")
+    logger.info(f"False Positive examples: {false_positive_examples}")
+    logger.info(f"False Negative examples: {false_negative_examples}")
+    logger.info(f"Missing expected label examples: {missing_label_examples}")
 
 
 def configure_logging(log_level=None):
@@ -156,6 +182,7 @@ def parse_args():
     parser.add_argument("--retries", default=3, type=int, help="Number of retries for API calls")
     parser.add_argument("--use_batch_api", default=False, action=argparse.BooleanOptionalAction, help="Use batch call for API models")
 
+    parser.add_argument("--sample_size", default=1, type=int, help="Number of samples used to calculate statistics.")
     return parser.parse_args()
 
 
