@@ -53,24 +53,19 @@ def get_stats(outputs, dataset):
     nulls = []
     for i, (example, output_text) in enumerate(zip(dataset, outputs)):
         ground_truth_text = example[OUTPUT_FIELD]
-        grount_truth_label = extract_xml_answer(ground_truth_text)
+        ground_truth_label = extract_xml_answer(ground_truth_text)
         predicted_label = extract_xml_answer(output_text)
 
-        if predicted_label.upper() == "PASS" and grount_truth_label.upper() == "PASS":
+        if predicted_label.upper() == "PASS" and ground_truth_label.upper() == "PASS":
             classification = 'true_pass'
-            logger.debug("Correct, PASS")
-        elif predicted_label.upper() == "PASS" and grount_truth_label.upper() == "FAIL":
+        elif predicted_label.upper() == "PASS" and ground_truth_label.upper() == "FAIL":
             classification = 'false_pass'
-            logger.debug("False negative (labeled non-compliant dialogue as PASS)")
-        elif predicted_label.upper() == "FAIL" and grount_truth_label.upper() == "FAIL":
+        elif predicted_label.upper() == "FAIL" and ground_truth_label.upper() == "FAIL":
             classification = 'true_fail'
-            logger.debug("Correct, FAIL")
-        elif predicted_label.upper() == "FAIL" and grount_truth_label.upper() == "PASS":
+        elif predicted_label.upper() == "FAIL" and ground_truth_label.upper() == "PASS":
             classification = 'false_fail'
-            logger.debug("False positive (labeled compliant dialogue as FAIL)")
         else:
             classification = 'null'
-            logger.debug(f"Missing expected format. Got: {output_text}")
 
         if classification == 'true_pass' or classification == 'true_fail':
             num_correct += 1
@@ -95,7 +90,7 @@ def get_stats(outputs, dataset):
 def main(args):
     # Dataset
     dataset = datasets.load_dataset("json", data_files={"placeholder": args.dataset_path})["placeholder"]
-    n = args.num_examples if args.num_examples > 0 else len(dataset)
+    n = args.num_examples if args.num_examples > 0 and args.num_examples < len(dataset) else len(dataset)
     # Shuffle to ensure we get a random subset. Don't shuffle if we're using the whole thing so we can keep track of indices for frequent misclassifications.
     if n < len(dataset):
         dataset.shuffle(seed=42)
@@ -146,8 +141,8 @@ def parse_args():
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
     # parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct", type=str, help="Model name to load")
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2-1.5B-Instruct/huggingface_sft/7500", type=str, help="Model name to load")
-    parser.add_argument("--dataset_path", default="../data/easy_test_155.jsonl", type=str, help="Path to dataset")
-    # parser.add_argument("--dataset_path", default="../data/easy_train_8872.jsonl", type=str, help="Path to dataset")
+    parser.add_argument("--dataset_path", default="data/easy_test_155.jsonl", type=str, help="Path to dataset")
+    # parser.add_argument("--dataset_path", default="data/easy_train_8872.jsonl", type=str, help="Path to dataset")
     parser.add_argument("--num_examples", default=5, type=int, help="Number of examples to evaluate")
     parser.add_argument("--log_level", default=None, type=str, help="Log level")
     parser.add_argument("--use_vllm", default=True, action=argparse.BooleanOptionalAction, help="Use VLLM for generation")

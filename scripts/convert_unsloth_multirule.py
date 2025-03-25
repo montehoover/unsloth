@@ -18,11 +18,8 @@ Convert a Compliance dataset in the format:
 
 to an eval-friendly dataset in the format:
 {
-    input: str,
-    allpass_label: str,
-    rules_violated: List[int],
-    violation_lines: List[str],
-    explanations: List[str]
+    question: str,           # total = num_original_examples
+    answer: str,             # XML tagged as below
     num_rules: int,
 }
 """
@@ -30,20 +27,26 @@ to an eval-friendly dataset in the format:
 # These constants should match the constants at the top of main.py
 # TODO: Move these constants to a shared file
 INPUT_FIELD = "question"
-OUTPUT_LABEL_FIELD = "answer"
-OUTPUT_RULES_FIELD = "rules_violated"
-OUTPUT_VIOLATION_LINES_FIELD = "violation_lines"
-OUTPUT_EXPLANATIONS_FIELD = "explanations"
+OUTPUT_FIELD = "answer"
 NUM_RULES_METADATA = "num_rules"
 
-COT_OPENING = "\n<reasoning>"
-COT_CLOSING = "\n</reasoning>"
-LABEL_OPENING = "\n<answer>"
-LABEL_CLOSING = "\n</answer>"
-
-
+LABEL_OPENING = "<all_compliant>"
+LABEL_CLOSING = "</all_compliant>"
+RULES_OPENING = "<rules_violated>"
+RULES_CLOSING = "</rules_violated>"
+RULE_NUMBER_OPENING = "<rule_number>"
+RULE_NUMBER_CLOSING = "</rule_number>"
+LINE_OPENING = "<line_in_transcript>"
+LINE_CLOSING = "</line_in_transcript>"
+EXPLANATION_OPENING = "<explanation>"
+EXPLANATION_CLOSING = "</explanation>"
 class ComplianceProjectError(ValueError):
     pass
+
+def extract_xml_answer(text: str) -> str:
+    answer = text.split(LABEL_OPENING.strip())[-1]
+    answer = answer.split(LABEL_CLOSING.strip())[0]
+    return answer.strip()
 
 def print_stats(dataset_path, local=True, obj=False):
     if obj:
@@ -58,9 +61,10 @@ def print_stats(dataset_path, local=True, obj=False):
     num_fail = 0
     total_rules = 0
     for i, example in enumerate(dataset):
-        if example[OUTPUT_LABEL_FIELD] == "PASS":
+        label = extract_xml_answer(example[OUTPUT_FIELD])
+        if label == "PASS":
             num_pass += 1
-        elif example[OUTPUT_LABEL_FIELD] == "FAIL":
+        elif label == "FAIL":
             num_fail += 1
         else:
             raise ComplianceProjectError(f"Invalid label for example {i}: {example[OUTPUT_LABEL_FIELD]}")
@@ -79,7 +83,6 @@ Min rules: {min_rules}
 Max rules: {max_rules}
 Mean rules: {mean_rules:.1f}
 """)
-
 
 def clean_rule(rule):
     # Use regex to remove any whitespace followed by a number, a period, and a space at the beginning of the string
@@ -187,10 +190,26 @@ Transcript:
                     violation_explanations.append(cleaned_explanations[i][j])
                     break # We capture the first violation of a given rule and then move to the next rule
         
-        example[OUTPUT_LABEL_FIELD] = allpass_label
-        example[OUTPUT_RULES_FIELD] = violated_rules
-        example[OUTPUT_VIOLATION_LINES_FIELD] = violation_lines
-        example[OUTPUT_EXPLANATIONS_FIELD] = violation_explanations
+        # Format in xml tags
+        label_block = f"{LABEL_OPENING}\n{allpass_label}\n{LABEL_CLOSING}"
+        rules_block = f"{RULES_OPENING}\n{','.join(map(str, violated_rules))}\n{RULES_CLOSING}" if violated_rules else ""
+        explanation_blocks = ""
+        for i in range(len(violated_rules)):
+            rule_number = violated_rules[i]
+            line_in_transcript = violation_lines[i]
+            explanation = violation_explanations[i]
+            explanation_blocks += f"""
+{RULE_NUMBER_OPENING}
+{rule_number}
+{RULE_NUMBER_CLOSING}
+{LINE_OPENING}
+{line_in_transcript}
+{LINE_CLOSING}
+{EXPLANATION_OPENING}
+{explanation}
+{EXPLANATION_CLOSING}
+"""
+        example[OUTPUT_FIELD] = f"{label_block}\n{rules_block}\n{explanation_blocks}"
         example[NUM_RULES_METADATA] = num_rules
         examples.append(example)
 

@@ -3,9 +3,24 @@ import ast
 import datasets
 import json
 
+"""
+Convert a Compliance dataset in the format:
+{
+    rules: List[str],        # numbered 
+    dialogue: str, 
+    discussions: List[str],  # numbered
+    explanations: List[str], # numbered 
+    labels: List[str]}       # numbered
+}
 
-# These constants should match the constants at the top of main.py
-# TODO: Move these constants to a shared file
+to an eval-friendly dataset in the format:
+{
+    question: str,           # total = num_original_examples * num_rules * num_turns
+    answer: str,             # XML tagged as below
+}
+"""
+
+# These are defaults required by unsloth
 INPUT_FIELD = "question"
 OUTPUT_FIELD = "answer"
 
@@ -113,16 +128,15 @@ Conversation:
                 example[OUTPUT_FIELD] = f"{COT_OPENING} {discussion} {explanation} {COT_CLOSING} {LABEL_OPENING} {label} {LABEL_CLOSING}"
                 examples.append(example)
 
-    torchtune_dataset = datasets.Dataset.from_list(examples)
-    torchtune_dataset = torchtune_dataset.shuffle(seed=42)
+    processed_dataset = datasets.Dataset.from_list(examples)
 
-    if size is None or len(torchtune_dataset) < size:
-        size = len(torchtune_dataset)
-    torchtune_dataset = torchtune_dataset.select(range(size))
+    if size is not None and len(processed_dataset) > size:
+        processed_dataset = processed_dataset.shuffle(seed=42)
+        processed_dataset = processed_dataset.select(range(size))
 
-    file_path = f"{data_dir}/{subset}_{split}_{size}.jsonl"
+    file_path = f"{data_dir}/{subset}_{split}_{len(processed_dataset)}.jsonl"
 
-    torchtune_dataset.to_json(file_path, orient='records', lines=True, indent=None)
+    processed_dataset.to_json(file_path, orient='records', lines=True, indent=None)
     print(f"Examples in dataset preprocessed for TorchTune: {size}")
     print(f"Saved to {file_path}")
     return file_path
