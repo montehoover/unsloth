@@ -40,6 +40,7 @@ LINE_OPENING = "<line_in_transcript>"
 LINE_CLOSING = "</line_in_transcript>"
 EXPLANATION_OPENING = "<explanation>"
 EXPLANATION_CLOSING = "</explanation>"
+
 class ComplianceProjectError(ValueError):
     pass
 
@@ -67,7 +68,7 @@ def print_stats(dataset_path, local=True, obj=False):
         elif label == "FAIL":
             num_fail += 1
         else:
-            raise ComplianceProjectError(f"Invalid label for example {i}: {example[OUTPUT_LABEL_FIELD]}")
+            raise ComplianceProjectError(f"Invalid label for example {i}: {example[OUTPUT_FIELD]}")
         if example[NUM_RULES_METADATA] < min_rules:
             min_rules = example[NUM_RULES_METADATA]
         if example[NUM_RULES_METADATA] > max_rules:
@@ -228,11 +229,9 @@ def main(args):
     # Hard: 1670 train, 313 val, 44 test
     subsets = args.subsets
     splits = args.splits
-    file_paths = {}
     for subset in subsets:
         for split in splits:
             file_path = preprocess_dataset(huggingface_dataset, subset, split, size=args.train_size, data_dir=args.data_dir)
-            file_paths[f"{subset}_{split}"] = file_path
 
 def parse_args():
     parser = argparse.ArgumentParser()
