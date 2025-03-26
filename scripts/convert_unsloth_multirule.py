@@ -94,15 +94,6 @@ def clean_explanation(explanation):
     explanation = explanation.split(": ", 1)[1].strip()
     return explanation
 
-def parse_string_list_problem(string_list):
-    # Format: "1. ['Turn 1. ...', 'Turn 2. ...', ...]\n"
-    string_list = string_list.split(". ", 1)[1].strip()
-    turn_count = string_list.count("Turn ")
-    native_list = ast.literal_eval(string_list)
-    if len(native_list) > turn_count:
-        native_list = string_list.split("Turn ")[1:]
-    return native_list
-
 def parse_string_list(string_list):
     # Format: "1. ['PASS', 'PASS', 'PASS']\n"
     string_list = string_list.split(". ", 1)[1].strip()
@@ -235,35 +226,22 @@ def main(args):
     # Subset choices are "easy" or "hard"
     # Easy: 9007 train, 1793 val, 67 test
     # Hard: 1670 train, 313 val, 44 test
-    subsets = ["easy", "hard"]
-    splits = ["train", "validation", "test"]
+    subsets = args.subsets
+    splits = args.splits
     file_paths = {}
     for subset in subsets:
         for split in splits:
             file_path = preprocess_dataset(huggingface_dataset, subset, split, size=args.train_size, data_dir=args.data_dir)
             file_paths[f"{subset}_{split}"] = file_path
 
-    if args.extra_examples:
-        train_file_path = file_paths["easy_train"]
-        val_file_path = file_paths["easy_validation"]
-        
-        train_dataset = datasets.load_dataset("json", data_files={"_": train_file_path}, split="_")
-        val_dataset = datasets.load_dataset("json", data_files={"_": val_file_path}, split="_")
-        
-        combined_len = len(train_dataset) + len(val_dataset)
-        combined_file_path = f"{args.data_dir}/easy_train_{combined_len}.jsonl"
-        
-        combined_dataset = datasets.concatenate_datasets([train_dataset, val_dataset])
-        combined_dataset = combined_dataset.shuffle(seed=42)
-        combined_dataset.to_json(combined_file_path)
-        print(f"Combined easy train and validation datasets saved to {combined_file_path}")
-        
-
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", default="data/multi_rule", type=str)
     parser.add_argument("--train_size", default=10000, type=int)
-    parser.add_argument("--extra_examples", default=True, action=argparse.BooleanOptionalAction)
+    # parser.add_argument("--subsets", type=list, default=["easy", "hard"])
+    # parser.add_argument("--splits", type=list, default=["train", "validation", "test"])
+    parser.add_argument("--subsets", type=list, default=["multi_rule"])
+    parser.add_argument("--splits", type=list, default=["train", "test"])
     return parser.parse_args()
 
 

@@ -10,10 +10,11 @@ from tqdm import tqdm
 
 import logging
 logger = logging.getLogger(__name__)
-from vllm import LLM, SamplingParams
-from time import time_ns
 
-# Custom error class that is easy to catch and handle
+# Suppress annoying warning messages about new Gemini models it isn't aware of
+litellm._logging._disable_debugging()
+# litellm.set_verbose=True
+
 class ComplianceProjectError(ValueError):
     pass
 
@@ -76,6 +77,7 @@ class HfModelWrapper(LocalModelWrapper):
 
 class VllmModelWrapper(LocalModelWrapper):
     def __init__(self, model_name, temperature=0.6, top_k=300, max_new_tokens=1000, max_model_len=8192):
+        from vllm import LLM, SamplingParams
 
         super().__init__(model_name, temperature, top_k, max_new_tokens)
         self.model = LLM(model_name, max_model_len=max_model_len)
@@ -84,8 +86,7 @@ class VllmModelWrapper(LocalModelWrapper):
         sampling_params = SamplingParams(
             max_tokens=self.max_new_tokens,
             temperature=self.temperature,
-            top_k=self.top_k,
-            seed=time_ns()
+            top_k=self.top_k
         )
         # responses -> List[obj(prompt, outputs -> List[obj(text, ???)])]
         responses = self.model.generate(messages, sampling_params=sampling_params)
@@ -94,7 +95,7 @@ class VllmModelWrapper(LocalModelWrapper):
 
 
 class ApiModelWrapper(ModelWrapper):
-    def __init__(self, model_name, temperature=0.6, api_delay=None, retries=3, max_new_tokens=1000, log_interval=100):
+    def __init__(self, model_name, temperature=0.6, api_delay=None, retries=3, max_batch_size=100, max_new_tokens=1000, log_interval=100):
         self.model_name = f"gemini/{model_name}" if "gemini" in model_name else model_name
         self.temperature = temperature
         self.delay = api_delay if api_delay is not None else (4 if "gemini" in model_name else 0)
@@ -102,6 +103,7 @@ class ApiModelWrapper(ModelWrapper):
         self.max_new_tokens = max_new_tokens
         self.last_call_time = None
         self.log_interval = log_interval
+        self.max_batch_size = max_batch_size
         self.completion_count = 0
         self.lock = asyncio.Lock()
 
@@ -132,16 +134,28 @@ class ApiModelWrapper(ModelWrapper):
         return response['choices'][0]['message']['content']
 
     async def aget_response(self, message):
-        response = await litellm.acompletion(
-            model=self.model_name,
-            max_tokens=self.max_new_tokens,
-            temperature=self.temperature,
-            messages=message,
-        )
+        success = False
+        for _ in range(self.retries):
+            try:
+                response = await litellm.acompletion(
+                    model=self.model_name,
+                    max_tokens=self.max_new_tokens,
+                    temperature=self.temperature,
+                    messages=message,
+                )
+                success = True
+                break
+            except (litellm.ContentPolicyViolationError, openai.APIError) as e:
+                if isinstance(e, openai.APIError) and not litellm._should_retry(e.status_code):
+                    raise
+        if not success:
+            raise ComplianceProjectError(f"Failed after {self.retries} retries.")
+        
         async with self.lock:
             self.completion_count += 1
             if self.completion_count % self.log_interval == 0:
                 logger.info(f"Completed {self.completion_count} API calls.")
+        
         return response['choices'][0]['message']['content']
 
     async def gather_responses(self, messages):
@@ -154,18 +168,26 @@ class ApiModelWrapper(ModelWrapper):
     
     def get_responses(self, messages):
         if self.delay is None or self.delay == 0:
+            # batch_size = self.max_batch_size
+            # completed = 0
+            # outputs = []
+            # while completed < len(messages):
+            #     batch = messages[completed:completed+batch_size]
+            #     outputs += asyncio.run(self.gather_responses(batch))
+            #     completed += batch_size
             outputs = asyncio.run(self.gather_responses(messages))
         else:
             outputs = [self.get_response(message) for message in tqdm(messages)]
         return outputs
 
 class BatchApiModelWrapper(ModelWrapper):
-    def __init__(self, model_name, temperature=0.6, query_interval=60, log_interval=30):
+    def __init__(self, model_name, temperature=0.6, max_batch_size=100, query_interval=60, log_interval=30):
         self.model_name = model_name
         self.temperature = temperature
         self.client = openai.Client()
         self.query_interval = query_interval
         self.log_interval = log_interval
+        self.max_batch_size = max_batch_size
         unique_id = str(uuid.uuid4())
         self.input_filename = f"batch_input_{unique_id}.jsonl"
         self.output_filename = f"batch_output_{unique_id}.jsonl"
@@ -223,23 +245,30 @@ class BatchApiModelWrapper(ModelWrapper):
         return outputs
 
     def get_responses(self, messages):
-        self.create_jsonl_file(messages)
-        openai_file_obj = self.client.files.create(
-            file=open(self.input_filename, "rb"), 
-            purpose="batch"
-        )
-        logger.warning(f"OpenAI file object created. File ID: {openai_file_obj.id}")
-        batch_job = self.client.batches.create(
-            input_file_id=openai_file_obj.id,
-            endpoint="/v1/chat/completions",
-            completion_window="24h"
-        )
-        logger.warning(f"Batch job created. Batch ID: {batch_job.id}")
+        batch_size = self.max_batch_size
+        completed = 0
+        outputs = []
+        while completed < len(messages):
+            batch = messages[completed:completed+batch_size]
         
-        completed_batch_job = self.monitor_status_until_completion(batch_job.id)
-        if completed_batch_job.status != "completed":
-            raise ComplianceProjectError(f"Batch job failed with status {completed_batch_job.status}: \n{(json.dumps(completed_batch_job.dict(), indent=4))}")
+            self.create_jsonl_file(batch)
+            openai_file_obj = self.client.files.create(
+                file=open(self.input_filename, "rb"), 
+                purpose="batch"
+            )
+            logger.warning(f"OpenAI file object created. File ID: {openai_file_obj.id}")
+            batch_job = self.client.batches.create(
+                input_file_id=openai_file_obj.id,
+                endpoint="/v1/chat/completions",
+                completion_window="24h"
+            )
+            logger.warning(f"Batch job created. Batch ID: {batch_job.id}")
+            
+            completed_batch_job = self.monitor_status_until_completion(batch_job.id)
+            if completed_batch_job.status != "completed":
+                raise ComplianceProjectError(f"Batch job failed with status {completed_batch_job.status}: \n{(json.dumps(completed_batch_job.dict(), indent=4))}")
 
-        # After successful completion
-        outputs = self.get_responses_from_finished_job(batch_job.id)
+            # After successful completion
+            outputs += self.get_responses_from_finished_job(batch_job.id)
+            completed += batch_size
         return outputs

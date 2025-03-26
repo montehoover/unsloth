@@ -3,6 +3,7 @@ import os
 import datasets
 import uuid
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
+import numpy as np
 
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
@@ -196,20 +197,45 @@ def main(args):
     
     # Generation
     messages = [model.apply_chat_template(SYSTEM_PROMPT, x[INPUT_FIELD]) for x in dataset]
-    outputs = model.get_responses(messages)
-    # Save outputs to disk
-    datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"log/{args.model}_{args.dataset_path}_{uuid.uuid4()}.jsonl")
 
-    stats = get_stats(outputs, dataset)
-    logger.info(f"Accuracy: {stats["num_correct"]}/{n} ({stats["accuracy"]:.2%})")
-    logger.info(f"False Positives: {len(stats["false_positives"])}")
-    logger.info(f"False Negatives: {len(stats["false_negatives"])}")
-    logger.info(f"Missing expected label: {len(stats["nulls"])}")
-    logger.info(f"False Positive examples: {stats["false_positives"]}")
-    logger.info(f"False Negative examples: {stats["false_negatives"]}")
-    logger.info(f"Missing expected label examples: {stats["nulls"]}")
-    logger.info(f"Missed rules: {stats["missed_rules"]}")
-    logger.info(f"Extra rules: {stats["extra_rules"]}")
+    accuracies = []
+    num_correct = 0
+    false_positives = 0
+    false_negatives = 0
+    missing_labels = 0
+    false_positive_examples = []
+    false_negative_examples = []
+    missing_label_examples = []
+    for _ in range(args.sample_size):
+        outputs = model.get_responses(messages)
+
+        # Evaluation
+        stats = get_stats(outputs, dataset)
+
+        accuracies.append(stats["accuracy"])
+        num_correct += stats["num_correct"]
+
+        false_positives += len(stats["false_positives"])
+        false_negatives += len(stats["false_negatives"])
+        missing_labels += len(stats["nulls"])
+
+        false_positive_examples.extend(stats["false_positives"])
+        false_negative_examples.extend(stats["false_negatives"])
+        missing_label_examples.extend(stats["nulls"])
+
+    logger.info(f"Raw accuracy per sample: {accuracies}")
+    accuracies = np.array(accuracies)
+    logger.info(f"Accuracy: {num_correct / args.sample_size:.2f}/{n} ({accuracies.mean():.2%})")
+    logger.info(f"Accuracy standard deviation = {accuracies.std():.2%}")
+    logger.info(f"False Positives: {false_positives} ({false_positives / args.sample_size:0.2f} per sample)")
+    logger.info(f"False Negatives: {false_negatives} ({false_negatives / args.sample_size:0.2f} per sample)")
+    logger.info(f"Missing expected label: {missing_labels} ({missing_labels  / args.sample_size:0.2f} per sample)")
+    logger.info(f"False Positive examples: {sorted(false_positive_examples)}")
+    logger.info(f"False Negative examples: {sorted(false_negative_examples)}")
+    logger.info(f"Missing expected label examples: {sorted(missing_label_examples)}")
+
+    # Save outputs to disk as a log
+    datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"log/{args.model}_{args.dataset_path}_{uuid.uuid4()}.jsonl")
     
 def configure_logging(log_level=None):
     # Determine log level: CLI argument > Environment variable > Default (INFO)
@@ -228,7 +254,7 @@ def parse_args():
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
     # parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct", type=str, help="Model name to load")
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2-1.5B-Instruct/huggingface_sft/7500", type=str, help="Model name to load")
-    parser.add_argument("--dataset_path", default="data/multi_rule/easy_test_28.jsonl", type=str, help="Path to dataset")
+    parser.add_argument("--dataset_path", default="data/multi_rule/multi_rule_test_98.jsonl", type=str, help="Path to dataset")
     # parser.add_argument("--dataset_path", default="data/easy_test_225.jsonl", type=str, help="Path to dataset")
     # parser.add_argument("--dataset_path", default="data/easy_train_8872.jsonl", type=str, help="Path to dataset")
     parser.add_argument("--num_examples", default=100, type=int, help="Number of examples to evaluate")
@@ -243,6 +269,8 @@ def parse_args():
     parser.add_argument("--api_delay", default=None, type=float, help="Minimum delay between API calls")
     parser.add_argument("--retries", default=3, type=int, help="Number of retries for API calls")
     parser.add_argument("--use_batch_api", default=False, action=argparse.BooleanOptionalAction, help="Use batch call for API models")
+    # Error bands
+    parser.add_argument("--sample_size", default=1, type=int, help="Number of samples used to calculate statistics.")
 
     return parser.parse_args()
 
