@@ -6,6 +6,22 @@ import datasets
 from tqdm import tqdm
 import re
 
+from constants import (
+    INPUT_FIELD,
+    OUTPUT_FIELD,
+    LABEL_OPENING,
+    LABEL_CLOSING,
+    RULES_OPENING,
+    RULES_CLOSING,
+    RULE_NUMBER_OPENING,
+    RULE_NUMBER_CLOSING,
+    LINE_OPENING,
+    LINE_CLOSING,
+    EXPLANATION_OPENING,
+    EXPLANATION_CLOSING,
+    NUM_RULES_METADATA,
+)
+
 """
 Convert a Compliance dataset in the format:
 {
@@ -23,23 +39,6 @@ to an eval-friendly dataset in the format:
     num_rules: int,
 }
 """
-
-# These constants should match the constants at the top of main.py
-# TODO: Move these constants to a shared file
-INPUT_FIELD = "question"
-OUTPUT_FIELD = "answer"
-NUM_RULES_METADATA = "num_rules"
-
-LABEL_OPENING = "<all_compliant>"
-LABEL_CLOSING = "</all_compliant>"
-RULES_OPENING = "<rules_violated>"
-RULES_CLOSING = "</rules_violated>"
-RULE_NUMBER_OPENING = "<rule_number>"
-RULE_NUMBER_CLOSING = "</rule_number>"
-LINE_OPENING = "<line_in_transcript>"
-LINE_CLOSING = "</line_in_transcript>"
-EXPLANATION_OPENING = "<explanation>"
-EXPLANATION_CLOSING = "</explanation>"
 
 class ComplianceProjectError(ValueError):
     pass

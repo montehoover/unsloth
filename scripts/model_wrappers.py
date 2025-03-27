@@ -8,6 +8,8 @@ import openai
 import datasets
 from tqdm import tqdm
 
+from constants import COT_OPENING
+
 import logging
 logger = logging.getLogger(__name__)
 
@@ -28,8 +30,18 @@ class ModelWrapper:
                 {'role': 'user', 'content': user_content}
             ]
 
-    def apply_chat_template(self, system_content=None, user_content=None):
+    def get_message_template_cot(self, system_content, user_content):
+        return [
+            {'role': 'system', 'content': system_content},
+            {'role': 'user', 'content': user_content},
+            {'role': 'assistant', 'content': COT_OPENING},
+        ]
+
+    def apply_chat_template(self, system_content, user_content):
         return self.get_message_template(system_content, user_content)
+    
+    def apply_chat_template_cot(self, system_content, user_content):
+        return self.get_message_template_cot(system_content, user_content)
 
 
 class LocalModelWrapper(ModelWrapper):

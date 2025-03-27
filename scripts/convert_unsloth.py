@@ -3,6 +3,8 @@ import ast
 import datasets
 import json
 
+from constants import INPUT_FIELD, OUTPUT_FIELD, COT_OPENING, COT_CLOSING, LABEL_OPENING, LABEL_CLOSING
+
 """
 Convert a Compliance dataset in the format:
 {
@@ -19,16 +21,6 @@ to an eval-friendly dataset in the format:
     answer: str,             # XML tagged as below
 }
 """
-
-# These are defaults required by unsloth
-INPUT_FIELD = "question"
-OUTPUT_FIELD = "answer"
-
-# These constants should match with the system prompt in the config file and with the GRPO constants in Unsloth
-COT_OPENING = "\n<reasoning>"
-COT_CLOSING = "\n</reasoning>"
-LABEL_OPENING = "\n<answer>"
-LABEL_CLOSING = "\n</answer>"
 
 class ComplianceProjectError(ValueError):
     pass
