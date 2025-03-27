@@ -362,7 +362,8 @@ def main(args):
     
     # Generation
     messages = [model.apply_chat_template(SYSTEM_PROMPT, x[INPUT_FIELD]) for x in dataset]
-    outputs = model.get_responses(messages)
+    outputs = model.get_responses(messages, args.logit_bias) if args.logit_bias else model.get_responses(messages)
+    # outputs = model.get_responses)
 
     # Evaluation
     stats = get_stats(outputs, dataset)

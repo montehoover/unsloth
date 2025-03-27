@@ -78,8 +78,15 @@ class HfModelWrapper(LocalModelWrapper):
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, device_map="auto", torch_dtype=torch.bfloat16
         )
+    
+    def get_tokens(self, word):
+        return self.tokenizer([word], add_special_tokens=False).input_ids[0]
+    
+    def get_response(self, message, logit_bias=None):
+        
+        if logit_bias is not None:
+            sequence_bias = [[self.get_tokens(word), bias] for word, bias in logit_bias]
 
-    def get_response(self, message):
         inputs = self.tokenizer(message, return_tensors="pt").to(self.model.device)
         output_content = self.model.generate(
             **inputs,
@@ -87,7 +94,8 @@ class HfModelWrapper(LocalModelWrapper):
             num_return_sequences=1,
             temperature=self.temperature,
             top_k=self.top_k,
-            pad_token_id=self.tokenizer.pad_token_id
+            pad_token_id=self.tokenizer.pad_token_id,
+            sequence_bias=sequence_bias if logit_bias is not None else None
         )
         output_text = self.tokenizer.decode(output_content[0], skip_special_tokens=True)
         return output_text
@@ -99,22 +107,27 @@ class HfModelWrapper(LocalModelWrapper):
 
 class VllmModelWrapper(LocalModelWrapper):
     def __init__(self, model_name, temperature=0.6, top_k=300, max_new_tokens=1000, max_model_len=8192):
-        from vllm import LLM, SamplingParams
-
         super().__init__(model_name, temperature, top_k, max_new_tokens)
-        self.model = LLM(model_name, max_model_len=max_model_len, gpu_memory_utilization=0.95)
+        self.model = LLM(model_name, max_model_len=max_model_len)
 
-    def get_responses(self, messages):
+    def get_tokens(self, word):
+        return self.tokenizer([word], add_special_tokens=False).input_ids[0]
+
+    def get_responses(self, messages, logit_bias=None):
+
+        if logit_bias is not None:
+            sequence_bias = [[self.get_tokens(word), bias] for word, bias in logit_bias]
+
         sampling_params = SamplingParams(
             max_tokens=self.max_new_tokens,
             temperature=self.temperature,
-            top_k=self.top_k
+            top_k=self.top_k,
+            logit_bias=sequence_bias if logit_bias is not None else None
         )
         # responses -> List[obj(prompt, outputs -> List[obj(text, ???)])]
         responses = self.model.generate(messages, sampling_params=sampling_params)
         outputs = [response.outputs[0].text for response in responses]
         return outputs
-
 
 class ApiModelWrapper(ModelWrapper):
     def __init__(self, model_name, temperature=0.6, api_delay=None, retries=3, max_batch_size=100, max_new_tokens=1000, log_interval=100):
