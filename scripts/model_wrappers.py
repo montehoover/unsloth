@@ -7,6 +7,9 @@ import litellm
 import openai
 import datasets
 from tqdm import tqdm
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from vllm import LLM, SamplingParams
 
 from constants import COT_OPENING
 
@@ -46,9 +49,6 @@ class ModelWrapper:
 
 class LocalModelWrapper(ModelWrapper):
     def __init__(self, model_name, temperature=0.6, top_k=300, max_new_tokens=1000):
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
         self.model_name = model_name
         self.temperature = temperature
         self.top_k = top_k
@@ -58,8 +58,18 @@ class LocalModelWrapper(ModelWrapper):
 
     def apply_chat_template(self, system_content, user_content):
         message = super().apply_chat_template(system_content, user_content)
-        prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
+        try:
+            prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
+        except Exception as e:
+            print(message)
+            raise
         return prompt
+    
+    def apply_chat_template_cot(self, system_content, user_content):
+        message = super().apply_chat_template_cot(system_content, user_content)
+        prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
+        return prompt
+
 
 
 class HfModelWrapper(LocalModelWrapper):
@@ -89,10 +99,8 @@ class HfModelWrapper(LocalModelWrapper):
 
 class VllmModelWrapper(LocalModelWrapper):
     def __init__(self, model_name, temperature=0.6, top_k=300, max_new_tokens=1000, max_model_len=8192):
-        from vllm import LLM, SamplingParams
-
         super().__init__(model_name, temperature, top_k, max_new_tokens)
-        self.model = LLM(model_name, max_model_len=max_model_len)
+        self.model = LLM(model_name, max_model_len=max_model_len, gpu_memory_utilization=0.95)
 
     def get_responses(self, messages):
         sampling_params = SamplingParams(

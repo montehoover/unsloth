@@ -1,9 +1,13 @@
 import argparse
-import ast
 import datasets
-import json
+from tqdm import tqdm
 
-from constants import INPUT_FIELD, OUTPUT_FIELD, COT_OPENING, COT_CLOSING, LABEL_OPENING, LABEL_CLOSING
+from constants import (
+    INPUT_FIELD,
+    OUTPUT_FIELD,
+    NUM_RULES_METADATA,
+)
+from helpers import get_cleaned_fields, get_multirule_input, get_multirule_output, get_singlerule_examples, print_stats
 
 """
 Convert a Compliance dataset in the format:
@@ -17,139 +21,63 @@ Convert a Compliance dataset in the format:
 
 to an eval-friendly dataset in the format:
 {
-    question: str,           # total = num_original_examples * num_rules * num_turns
+    question: str,           # total = num_original_examples
     answer: str,             # XML tagged as below
+    num_rules: int,          # Optional
 }
 """
 
-class ComplianceProjectError(ValueError):
-    pass
-
-def clean_rule(rule):
-    # Looking for 1. or 2. etc.
-    splits = rule.split(". ", 1)
-    if len(splits) > 1:
-        rule = splits[1].strip()
-    else:
-        rule = rule.strip()
-    return rule
-
-def clean_explanation(explanation):
-    # Looking for "Turn x: "
-    explanation = explanation.split(": ", 1)[1].strip()
-    return explanation
-
-def parse_string_list(string_list):
-    # Format: "1. ['PASS', 'PASS', 'PASS']\n"
-    string_list = string_list.split(". ", 1)[1].strip()
-    native_list = ast.literal_eval(string_list)
-    return native_list
-
-def get_dialogue_turns(dialogue, expected_turns, example_index=-1):
-    delimiters = ["'User':", """"User":"""]
-    dialogue_turns = []
-    for delimiter in delimiters:
-        if delimiter in dialogue:
-            dialogue_preamble = dialogue.split(delimiter, 1)[0]
-            main_dialogue = dialogue.split(delimiter, 1)[1]
-            dialogue_turns = [f"{delimiter}{item}" for item in main_dialogue.split(delimiter) if item]
-            dialogue_turns[0] = dialogue_preamble + dialogue_turns[0]
-            break
-    if len(dialogue_turns) != expected_turns:
-        raise ComplianceProjectError(f"""
-            Example {example_index}: Number of dialogue turns ({len(dialogue_turns)}) does not match number of turns in labels ({expected_turns}).
-            Delimiters: {delimiters}
-            Dialogue: {json.dumps(dialogue_turns, indent=4)}
-            """)
-    return dialogue_turns
-    
 def preprocess_dataset(dataset_path, subset=None, split=None, size=None, local=False, data_dir="data"):
     if local:
-        dataset = datasets.load_dataset('json', data_files=dataset_path)['train']
+        dataset = datasets.load_dataset("json", data_files={"placeholder": dataset_path})["placeholder"]
     else:
         dataset = datasets.load_dataset(dataset_path, subset, split=split)
     print(f"Examples in {subset} {split}: {len(dataset)}")
 
     examples = []
-    for row_index, row in enumerate(dataset):
-        ##################
-        # Setup
-        ##################
-        rules = row["rules"]
-        dialogue = row["dialogue"]
-        labels = row["labels"]
-        explanations = row["explanations"]
-        discussions = row["discussions"]
-
-        cleaned_rules = []
-        cleaned_labels = []
-        cleaned_explanations = []
-        cleaned_discussions = []
-        for i in range(len(rules)):
-            cleaned_rules.append(clean_rule(rules[i]))
-            cleaned_labels.append(parse_string_list(labels[i]))
-            cleaned_explanations.append([clean_explanation(explanation) for explanation in parse_string_list(explanations[i])])
-            cleaned_discussions.append([clean_explanation(discussion) for discussion in parse_string_list(discussions[i])])
-
-        num_rules = len(cleaned_rules)
-        num_turns = len(cleaned_labels[0])
-        dialogue_turns = get_dialogue_turns(dialogue, expected_turns=num_turns, example_index=row_index)
-
-        for i in range(num_rules):
-            for j in range(num_turns):
-                example = {}
-
-                ##################
-                # Input
-                ##################
-                rule = cleaned_rules[i]
-                dialogue_subset = "".join(dialogue_turns[:j+1])
-                example[INPUT_FIELD] = f'''
-Rule Agent must follow:
-{rule}
-
-Conversation:
-{dialogue_subset}
-'''
-                ##################
-                # Output        
-                ##################
-                discussion = cleaned_discussions[i][j]
-                explanation = cleaned_explanations[i][j]
-                label = cleaned_labels[i][j]
-                example[OUTPUT_FIELD] = f"{COT_OPENING} {discussion} {explanation} {COT_CLOSING} {LABEL_OPENING} {label} {LABEL_CLOSING}"
-                examples.append(example)
-
+    for row_index, row in tqdm(enumerate(dataset)):
+        rules, labels, explanations, discussions, dialogue, dialogue_turns, num_rules, num_turns = get_cleaned_fields(row, row_index)
+        if args.multirule:
+            example = {}
+            example[INPUT_FIELD] = get_multirule_input(rules, labels, explanations, dialogue)
+            example[OUTPUT_FIELD] = get_multirule_output(labels, explanations, dialogue_turns, num_rules, num_turns)
+            example[NUM_RULES_METADATA] = num_rules
+            new_examples = [example]
+        else:
+            new_examples = get_singlerule_examples(
+                rules,
+                labels,
+                explanations,
+                discussions,
+                dialogue_turns,
+                num_rules,
+                num_turns,
+            )
+        examples.extend(new_examples)
     processed_dataset = datasets.Dataset.from_list(examples)
 
     if size is not None and len(processed_dataset) > size:
         processed_dataset = processed_dataset.shuffle(seed=42)
         processed_dataset = processed_dataset.select(range(size))
-
-    file_path = f"{data_dir}/{subset}_{split}_{len(processed_dataset)}.jsonl"
-
-    processed_dataset.to_json(file_path, orient='records', lines=True, indent=None)
-    print(f"Examples in dataset preprocessed for TorchTune: {size}")
+    type = "multirule" if args.multirule else "singlerule"
+    file_path = f"{data_dir}/{type}/{subset}_{split}_{len(processed_dataset)}.jsonl"
+    processed_dataset.to_json(file_path)
     print(f"Saved to {file_path}")
     return file_path
 
 
 def main(args):
-    # Local:
-    # preprocess_dataset("test.jsonl", local=True)
-
     huggingface_dataset = "tomg-group-umd/compliance"
-    # Subset choices are "easy" or "hard"
-    # Easy: 9007 train, 1793 val, 67 test
-    # Hard: 1670 train, 313 val, 44 test
-    subsets = ["easy", "hard"]
-    splits = ["train", "validation", "test"]
+    subsets = args.subsets
+    splits = args.splits
     file_paths = {}
     for subset in subsets:
         for split in splits:
             file_path = preprocess_dataset(huggingface_dataset, subset, split, size=args.train_size, data_dir=args.data_dir)
             file_paths[f"{subset}_{split}"] = file_path
-
+            if args.multirule:
+                print_stats(file_path)
+    
     if args.extra_examples:
         train_file_path = file_paths["easy_train"]
         val_file_path = file_paths["easy_validation"]
@@ -164,14 +92,17 @@ def main(args):
         combined_dataset = combined_dataset.shuffle(seed=42)
         combined_dataset.to_json(combined_file_path)
         print(f"Combined easy train and validation datasets saved to {combined_file_path}")
-        
-
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", default="data", type=str)
     parser.add_argument("--train_size", default=10000, type=int)
-    parser.add_argument("--extra_examples", default=True, action=argparse.BooleanOptionalAction)
+    # parser.add_argument("--subsets", type=list, default=["easy", "hard"])
+    # parser.add_argument("--splits", type=list, default=["train", "validation", "test"])
+    parser.add_argument("--subsets", type=list, default=["multi_rule"])
+    parser.add_argument("--splits", type=list, default=["train", "test"])
+    parser.add_argument("--extra_examples", default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument("--multirule", default=False, action=argparse.BooleanOptionalAction)
     return parser.parse_args()
 
 

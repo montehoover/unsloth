@@ -1,3 +1,4 @@
 unsloth
 vllm
 wandb
+scikit-learn
