@@ -108,7 +108,8 @@ class VllmModelWrapper(LocalModelWrapper):
         sampling_params = SamplingParams(
             max_tokens=self.max_new_tokens,
             temperature=self.temperature,
-            top_k=self.top_k
+            top_k=self.top_k,
+            seed=time.time_ns(),
         )
         # responses -> List[obj(prompt, outputs -> List[obj(text, ???)])]
         responses = self.model.generate(messages, sampling_params=sampling_params)
