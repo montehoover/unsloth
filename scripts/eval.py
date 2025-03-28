@@ -6,7 +6,7 @@ import uuid
 import numpy as np
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
-from constants import LLAMAGUARD_TEMPLATE, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, INPUT_FIELD
+from constants import LLAMAGUARD_TEMPLATE, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, UNSLOTH_INPUT_FIELD
 from helpers import apply_llamaguard_template, confirm_model_compatibility, get_stats, confirm_dataset_compatibility, map_llamaguard_output
 
 from dotenv import load_dotenv, find_dotenv
@@ -52,7 +52,7 @@ def main(args):
         template_fn = model.apply_chat_template
 
 
-    messages = [template_fn(sys_prompt, x[INPUT_FIELD]) for x in dataset]
+    messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD]) for x in dataset]
 
 
     accuracies = []

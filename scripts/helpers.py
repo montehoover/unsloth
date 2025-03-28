@@ -1,4 +1,5 @@
 import ast
+import json
 import random
 import re
 import datasets
@@ -8,19 +9,21 @@ from constants import (
     COT_OPENING,
     EXPLANATION_CLOSING,
     EXPLANATION_OPENING,
-    INPUT_FIELD,
+    TORCHTUNE_INPUT_FIELD,
+    TORCHTUNE_OUTPUT_FIELD,
+    UNSLOTH_INPUT_FIELD,
+    UNSLOTH_OUTPUT_FIELD,
     LINE_CLOSING,
     LINE_OPENING,
     NUM_RULES_METADATA,
-    OUTPUT_FIELD,
     LABEL_OPENING,
     LABEL_CLOSING,
     RULE_NUMBER_CLOSING,
     RULE_NUMBER_OPENING,
     RULES_OPENING,
     RULES_CLOSING,
-    MULTIRULE_LABEL_CLOSING,
-    MULTIRULE_LABEL_OPENING,
+    LABEL_CLOSING,
+    LABEL_OPENING,
     RULE_START,
     CONVERSATION_START,
 )
@@ -68,8 +71,8 @@ def filter_nulls(ground_truth_labels, predicted_labels):
 
 def get_stats(outputs, dataset, multirule=False):
     if multirule:
-        opening = MULTIRULE_LABEL_OPENING
-        closing = MULTIRULE_LABEL_CLOSING
+        opening = LABEL_OPENING
+        closing = LABEL_CLOSING
     else:
         opening = LABEL_OPENING
         closing = LABEL_CLOSING
@@ -79,7 +82,7 @@ def get_stats(outputs, dataset, multirule=False):
     false_positives = []  # The transcript was fine but we flagged a violation.
     rule_violations = {"missed": 0, "extra": 0}
     for i, (example, output_text) in enumerate(zip(dataset, outputs)):
-        ground_truth_text = example[OUTPUT_FIELD]
+        ground_truth_text = example[UNSLOTH_OUTPUT_FIELD]
         ground_truth_label = extract_xml_answer(ground_truth_text, opening, closing)
         predicted_label = extract_xml_answer(output_text, opening, closing)
 
@@ -130,9 +133,9 @@ def confirm_model_compatibility(model_name, use_llamaguard):
 
 def confirm_dataset_compatibility(dataset_path, use_multirule):
     dataset = datasets.load_dataset("json", data_files={"placeholder": dataset_path})["placeholder"]
-    output_text = dataset[0][OUTPUT_FIELD]
+    output_text = dataset[0][UNSLOTH_OUTPUT_FIELD]
     if use_multirule:
-        required_tag = MULTIRULE_LABEL_OPENING
+        required_tag = LABEL_OPENING
     else:
         required_tag = LABEL_OPENING
     if required_tag not in output_text:
@@ -161,50 +164,82 @@ def map_llamaguard_output(output):
         return '<answer>PASS</answer>'
     else:
         return 'null'
-    
-def get_multirule_input(rules, labels, explanations, dialogue):
-    # Shuffle all of the lists (rules, labels, explanations) so there is no bias in the rule order
-    zipped = list(zip(rules, labels, explanations))
-    random.shuffle(zipped)
-    rules, labels, explanations = zip(*zipped)
 
+def get_cot(discussions, explanations, nlp_processor, num_sentences=4):
+    # There is a discussion for every rule, and within that a discussion for every turn. Get only the discussion from the last turn for the COT.
+    last_turn_discussions = [turn_discussions[-1] for turn_discussions in discussions]
+    last_turn_explanations = [explanations[-1] for explanations in explanations]
+
+    short_discussions = []
+    # This whole thing is slow so we're trying to speed it up with the pipeline version of Spacy's nlp processor
+    nlp_pipeline = nlp_processor.pipe(last_turn_discussions, disable=["ner", "tagger"])
+    for processed_discussion in nlp_pipeline:
+        sentences = [sent.text.strip() for sent in processed_discussion.sents]
+        first_few_sentences = sentences[:num_sentences]
+        short_discussion = ' '.join(first_few_sentences)
+        short_discussions.append(short_discussion)
+
+    # Combine the short discussions with the explanations into a single COT for each rule
+    cot_by_rule = [f"{short_discussion} {explanation}" for short_discussion, explanation in zip(short_discussions, last_turn_explanations)]
+    enumerated_cot = '\n'.join(f"Rule {i+1}. {cot}" for i, cot in enumerate(cot_by_rule))
+    return enumerated_cot
+
+
+def get_multirule_input(rules, labels, explanations, dialogue):
     enumerated_rules = '\n'.join(f"{i+1}. {rule}" for i, rule in enumerate(rules))
     input = f"{RULE_START}\n{enumerated_rules}\n\n{CONVERSATION_START}\n{dialogue}"
     return input
 
+def get_multirule_output(
+        labels, 
+        explanations, 
+        discussions, 
+        dialogue_turns, 
+        num_rules, 
+        num_turns, 
+        add_cot=False, 
+        nlp_processor=None, 
+        skip_explanations=False,
+        num_sentences=4
+    ):
+    allpass_label = "PASS"
+    violated_rules = []
+    violation_lines = []
+    violation_explanations = []
 
-def get_multirule_output(labels, explanations, dialogue_turns, num_rules, num_turns):
-        allpass_label = "PASS"
-        violated_rules = []
-        violation_lines = []
-        violation_explanations = []
+    for i in range(num_rules):
+        for j in range(num_turns):
+            if labels[i][j] == "FAIL":
+                allpass_label = "FAIL"
+                violated_rules.append(i+1)
+                violation_lines.append(dialogue_turns[j])
+                violation_explanations.append(explanations[i][j])
+                break # We capture the first violation of a given rule and then move to the next rule
+    
+    if add_cot:
+        cot = get_cot(discussions, explanations, nlp_processor, num_sentences=num_sentences)
 
-        for i in range(num_rules):
-            for j in range(num_turns):
-                if labels[i][j] == "FAIL":
-                    allpass_label = "FAIL"
-                    violated_rules.append(i+1)
-                    violation_lines.append(dialogue_turns[j])
-                    violation_explanations.append(explanations[i][j])
-                    break # We capture the first violation of a given rule and then move to the next rule
-        
-        # Format in xml tags
-        label_block = f"{MULTIRULE_LABEL_OPENING}\n{allpass_label}\n{MULTIRULE_LABEL_CLOSING}"
-        rules_block = f"{RULES_OPENING}\n{','.join(map(str, violated_rules))}\n{RULES_CLOSING}" if violated_rules else ""
-        explanation_blocks = ""
-        for i in range(len(violated_rules)):
-            rule_number = violated_rules[i]
-            line_in_transcript = violation_lines[i]
-            explanation = violation_explanations[i]
-            explanation_blocks += (
-                f"{RULE_NUMBER_OPENING}\n{rule_number}\n{RULE_NUMBER_CLOSING}\n"
-                f"{LINE_OPENING}\n{line_in_transcript}\n{LINE_CLOSING}\n"
-                f"{EXPLANATION_OPENING}\n{explanation}\n{EXPLANATION_CLOSING}\n"
-            )
-        output = f"{label_block}\n{rules_block}\n{explanation_blocks}"
-        return output
+    # Format in xml tags
+    cot_block = f"{COT_OPENING}\n{cot}\n{COT_CLOSING}\n" if add_cot else ""
+    label_block = f"{LABEL_OPENING}\n{allpass_label}\n{LABEL_CLOSING}"
+    rules_block = f"{RULES_OPENING}\n{','.join(map(str, violated_rules))}\n{RULES_CLOSING}" if violated_rules else ""
+    explanation_blocks = ""
+    for i in range(len(violated_rules)):
+        rule_number = violated_rules[i]
+        line_in_transcript = violation_lines[i]
+        explanation = violation_explanations[i]
+        explanation_blocks += (
+            f"{RULE_NUMBER_OPENING}\n{rule_number}\n{RULE_NUMBER_CLOSING}\n"
+            f"{LINE_OPENING}\n{line_in_transcript}\n{LINE_CLOSING}\n"
+            f"{EXPLANATION_OPENING}\n{explanation}\n{EXPLANATION_CLOSING}\n"
+        )
+    if skip_explanations:
+        output = f"{cot_block}\n{label_block}"
+    else:
+        output = f"{cot_block}\n{label_block}\n{rules_block}\n{explanation_blocks}"
+    return output
 
-def get_singlerule_examples(rules, labels, explanations, discussions, dialogue_turns, num_rules, num_turns):
+def get_singlerule_examples(rules, labels, explanations, discussions, dialogue_turns, num_rules, num_turns, input_field, output_field):
     examples = []
     for i in range(num_rules):
         for j in range(num_turns):
@@ -214,8 +249,8 @@ def get_singlerule_examples(rules, labels, explanations, discussions, dialogue_t
             explanation = explanations[i][j]
             label = labels[i][j]
             dialogue_subset = "".join(dialogue_turns[:j+1])
-            example[INPUT_FIELD] = f"{RULE_START}\n{rule}\n\n{CONVERSATION_START}\n{dialogue_subset}"
-            example[OUTPUT_FIELD] = f"{COT_OPENING}{discussion} {explanation}{COT_CLOSING}{LABEL_OPENING}{label}{LABEL_CLOSING}"
+            example[input_field] = f"{RULE_START}\n{rule}\n\n{CONVERSATION_START}\n{dialogue_subset}"
+            example[output_field] = f"{COT_OPENING}{discussion} {explanation}{COT_CLOSING}{LABEL_OPENING}{label}{LABEL_CLOSING}"
             examples.append(example)
     return examples
 
@@ -239,7 +274,7 @@ def get_cleaned_fields(example, example_index):
         dialogue_turns = get_dialogue_turns(dialogue, expected_turns=num_turns, example_index=example_index)
         return cleaned_rules, cleaned_labels, cleaned_explanations, cleaned_discussions, dialogue, dialogue_turns, num_rules, num_turns
 
-def print_stats(dataset_path, local=True, obj=False):
+def print_stats(dataset_path, local=True, obj=False, torchtune=False):
     if obj:
         dataset = dataset_path
     elif local:
@@ -252,13 +287,14 @@ def print_stats(dataset_path, local=True, obj=False):
     num_fail = 0
     total_rules = 0
     for i, example in enumerate(dataset):
-        label = extract_xml_answer(example[OUTPUT_FIELD], MULTIRULE_LABEL_OPENING, MULTIRULE_LABEL_CLOSING)
+        output_field = TORCHTUNE_OUTPUT_FIELD if torchtune else UNSLOTH_OUTPUT_FIELD
+        label = extract_xml_answer(example[output_field], LABEL_OPENING, LABEL_CLOSING)
         if label == "PASS":
             num_pass += 1
         elif label == "FAIL":
             num_fail += 1
         else:
-            raise ComplianceProjectError(f"Invalid label for example {i}: {example[OUTPUT_FIELD]}")
+            raise ComplianceProjectError(f"Invalid label for example {i}: {example[output_field]}")
         if example[NUM_RULES_METADATA] < min_rules:
             min_rules = example[NUM_RULES_METADATA]
         if example[NUM_RULES_METADATA] > max_rules:
@@ -308,3 +344,15 @@ def get_dialogue_turns(dialogue, expected_turns, example_index=-1):
             Dialogue: {json.dumps(dialogue_turns, indent=4)}
             """)
     return dialogue_turns
+
+def combine_datasets(non_cot_filepath, cot_filepath):
+    non_cot_dataset = datasets.load_dataset("json", data_files={"_": non_cot_filepath}, split="_")
+    cot_dataset = datasets.load_dataset("json", data_files={"_": cot_filepath}, split="_")
+    combined_dataset = datasets.concatenate_datasets([non_cot_dataset, cot_dataset])
+    combined_dataset = combined_dataset.shuffle(seed=42)
+    orig_size = len(cot_dataset)
+    new_size = len(combined_dataset)
+    new_path = cot_filepath.replace(str(orig_size), str(new_size)).replace("_cot", "_combined")
+    combined_dataset.to_json(new_path)
+    print(f"Saved combined dataset to {new_path}")
+    return new_path

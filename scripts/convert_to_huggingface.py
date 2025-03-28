@@ -27,15 +27,14 @@ def main(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert model to HuggingFace format")
-    parser.add_argument("--base_path",   default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_base", type=str, help="Path to base model")
-    # parser.add_argument("--base_path",   default="/fs/cml-projects/guardian_models/models/Qwen2-1.5B-Instruct/huggingface_base", type=str, help="Path to base model")
+    # parser.add_argument("--base_path",   default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_base", type=str, help="Path to base model")
+    parser.add_argument("--base_path",   default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_base", type=str, help="Path to base model")
     # parser.add_argument("--lora_path",   default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/sft_output/7500/epoch_4", type=str, help="Path to lora adapter")
-    parser.add_argument("--lora_path",  default="/fs/cml-projects/guardian_models/grpo/7500_1.0e-06_6_1_32_32_0.2_5/checkpoint-7500", type=str, help="Path to lora adapter")
-    # parser.add_argument("--lora_path",  default="/fs/cml-projects/guardian_models/grpo/Qwen2-1.5B_7500_1.0e-04_12_4_32_32_0.2_5/checkpoint-2218", type=str, help="Path to lora adapter")
-    parser.add_argument("--output_path", default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Path to save converted model")
-    # parser.add_argument("--output_path", default="/fs/cml-projects/guardian_models/models/Qwen2-1.5B-Instruct/huggingface_grpo", type=str, help="Path to save converted model")
+    # parser.add_argument("--lora_path",  default="/fs/cml-projects/guardian_models/grpo/7500_1.0e-06_6_1_32_32_0.2_5/checkpoint-7500", type=str, help="Path to lora adapter")
+    parser.add_argument("--lora_path",  default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/lora_7500/epoch_2", type=str, help="Path to lora adapter")
+    # parser.add_argument("--output_path", default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Path to save converted model")
+    parser.add_argument("--output_path", default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_sft/lora_7500", type=str, help="Path to save converted model")
     parser.add_argument("--test_output", action="store_true", help="Test output of converted model")
-    parser.add_argument("--output_dir", default="huggingface", type=str, help="Output directory for HuggingFace model")
     return parser.parse_args()
 
 
