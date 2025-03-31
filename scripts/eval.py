@@ -28,7 +28,7 @@ def main(args):
     dataset = dataset.select(range(n))
 
     # Model 
-    if "gpt" in args.model:
+    if "gpt" in args.model or "together_ai" in args.model:
         if args.use_batch_api:
             model = BatchApiModelWrapper(args.model, args.temperature)
         else:
