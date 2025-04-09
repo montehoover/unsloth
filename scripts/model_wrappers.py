@@ -82,11 +82,17 @@ class HfModelWrapper(LocalModelWrapper):
     def get_tokens(self, word):
         return self.tokenizer([word], add_special_tokens=False).input_ids[0]
     
-    def get_response(self, message, logit_bias=None):
-        
+    def get_response(self, message, logit_bias=None, threshold=None):
+        # TODO: FIX ALL THIS
         if logit_bias is not None:
-            sequence_bias = [[self.get_tokens(word), bias] for word, bias in logit_bias]
+            sequence_bias = [[self.get_tokens(word), float(bias)] for word, bias in logit_bias]
 
+        fail_token = self.tokenizer.encode("FAIL", add_special_tokens=False)[0]
+        pass_token = self.tokenizer.encode("PASS", add_special_tokens=False)[0]
+        import ipdb; ipdb.set_trace()
+        if threshold is not None:
+            from constants import LABEL_OPENING
+            message = message + f"{LABEL_OPENING}"
         inputs = self.tokenizer(message, return_tensors="pt").to(self.model.device)
         output_content = self.model.generate(
             **inputs,
@@ -95,13 +101,39 @@ class HfModelWrapper(LocalModelWrapper):
             temperature=self.temperature,
             top_k=self.top_k,
             pad_token_id=self.tokenizer.pad_token_id,
-            sequence_bias=sequence_bias if logit_bias is not None else None
+            sequence_bias=sequence_bias if logit_bias is not None else None,
+            output_logits=True if logit_bias is not None or threshold is not None else None,
+            return_dict_in_generate=True if logit_bias is not None or threshold is not None else None, output_scores=True if logit_bias is not None else None
         )
+
+        if threshold is not None:
+            try:
+                logits = output_content.logits
+                fail_idx = torch.nonzero(output_content.sequences == fail_token)[-1][-1].item()
+                pass_idx = torch.nonzero(output_content.sequences == pass_token)[-1][-1].item()
+                idx_to_use = fail_idx if fail_idx > pass_idx else pass_idx
+                # softmax on the logits on idx_to_use
+                softmax = torch.nn.functional.softmax(logits[idx_to_use-len(inputs.input_ids[0])], dim=-1)
+                # softmax_of_fail = softmax[0][fail_token]
+                softmax_of_pass = softmax[0][pass_token]
+                print("softmax_of_pass", softmax_of_pass)
+                if softmax_of_pass > threshold:
+                    output_content.sequences[0][idx_to_use] = pass_token
+                    print("PASS")
+                else:
+                    output_content.sequences[0][idx_to_use] = fail_token
+                    print("FAIL")
+            except Exception as e:
+                print(e)
+                print("Thresholding failed. Using default output.")
+            output_content = output_content.sequences
+
+        # else:
         output_text = self.tokenizer.decode(output_content[0], skip_special_tokens=True)
         return output_text
 
-    def get_responses(self, messages):
-        outputs = [self.get_response(message) for message in tqdm(messages)]
+    def get_responses(self, messages, logit_bias=None, threshold=None):
+        outputs = [self.get_response(message, logit_bias, threshold) for message in tqdm(messages)]
         return outputs
 
 

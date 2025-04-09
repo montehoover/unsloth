@@ -2,6 +2,7 @@ import ast
 import random
 import re
 import datasets
+import json
 from sklearn.metrics import accuracy_score, f1_score
 from constants import (
     COT_CLOSING,
@@ -82,7 +83,7 @@ def get_stats(outputs, dataset, multirule=False):
         ground_truth_text = example[OUTPUT_FIELD]
         ground_truth_label = extract_xml_answer(ground_truth_text, opening, closing)
         predicted_label = extract_xml_answer(output_text, opening, closing)
-
+        print(f"Ground truth: {ground_truth_label}, Predicted: {predicted_label}")
         ground_truth_labels.append(ground_truth_label)
         predicted_labels.append(predicted_label)
         
@@ -90,7 +91,7 @@ def get_stats(outputs, dataset, multirule=False):
             # When it gets it right that some rules were violated, check to see if it marked the right rules.
             if predicted_label == "FAIL" and ground_truth_label == "FAIL":
                 update_rule_violations(ground_truth_label, output_text, rule_violations)
-            
+
         if predicted_label == "PASS" and ground_truth_label == "FAIL":
             false_negatives.append(i)
         if predicted_label == "FAIL" and ground_truth_label == "PASS":

@@ -1,7 +1,7 @@
 import argparse
 import datasets
 from tqdm import tqdm
-
+# import json
 from constants import (
     INPUT_FIELD,
     OUTPUT_FIELD,
@@ -97,9 +97,9 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", default="data", type=str)
     parser.add_argument("--train_size", default=10000, type=int)
-    # parser.add_argument("--subsets", type=list, default=["easy", "hard"])
+    parser.add_argument("--subsets", type=list, default=["easy"])
     # parser.add_argument("--splits", type=list, default=["train", "validation", "test"])
-    parser.add_argument("--subsets", type=list, default=["multi_rule"])
+    # parser.add_argument("--subsets", type=list, default=["multi_rule"])
     parser.add_argument("--splits", type=list, default=["train", "test"])
     parser.add_argument("--extra_examples", default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument("--multirule", default=False, action=argparse.BooleanOptionalAction)
