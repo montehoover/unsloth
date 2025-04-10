@@ -6,7 +6,7 @@ import uuid
 import numpy as np
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
-from constants import LLAMAGUARD_TEMPLATE, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, UNSLOTH_INPUT_FIELD
+from constants import LLAMAGUARD_TEMPLATE, MULTIRULE_SYSTEM_PROMPT_V2, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, UNSLOTH_INPUT_FIELD
 from helpers import apply_llamaguard_template, confirm_model_compatibility, get_stats, confirm_dataset_compatibility, map_llamaguard_output
 
 from dotenv import load_dotenv, find_dotenv
@@ -39,21 +39,22 @@ def main(args):
         model = HfModelWrapper(args.model, args.temperature, args.top_k, args.max_new_tokens)
     
     # Generation
-    sys_prompt = MULTIRULE_SYSTEM_PROMPT if args.multirule else SYSTEM_PROMPT
+    sys_prompt = MULTIRULE_SYSTEM_PROMPT_V2 if args.multirule else SYSTEM_PROMPT
     if "Llama-Guard" in args.model:
-        assert not args.multirule, "Llama-Guard isn't implemented for MultiRule evaluation yet"
+        # assert not args.multirule, "Llama-Guard isn't implemented for MultiRule evaluation yet"
         sys_prompt = LLAMAGUARD_TEMPLATE
         template_fn = apply_llamaguard_template
     elif args.multirule:
-        sys_prompt = MULTIRULE_SYSTEM_PROMPT
+        sys_prompt = MULTIRULE_SYSTEM_PROMPT_V2
         template_fn = model.apply_chat_template_cot if args.use_cot else model.apply_chat_template
     else:
         sys_prompt = SYSTEM_PROMPT
         template_fn = model.apply_chat_template
 
-
     messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD]) for x in dataset]
 
+    # A thing for WildGuard
+    # messages = [f"<s>[INST]{sys_prompt}\n{x[UNSLOTH_INPUT_FIELD]}[/INST]" for x in dataset]
 
     accuracies = []
     false_positives = 0
@@ -71,6 +72,7 @@ def main(args):
         stats = get_stats(outputs, dataset, multirule=args.multirule)
 
         accuracies.append(stats["accuracy"])
+        print(f"Accuracy: {stats['accuracy']:.2%}")
 
         false_positives += len(stats["false_positives"])
         false_negatives += len(stats["false_negatives"])
@@ -80,6 +82,8 @@ def main(args):
         false_negative_examples.extend(stats["false_negatives"])
         missing_label_examples.extend(stats["nulls"])
 
+    if missing_label_examples:
+        logger.info(json.dumps(outputs[missing_label_examples[0]], indent=4))
     logger.info(f"Raw accuracy per sample: {accuracies}")
     accuracies = np.array(accuracies)
     logger.info(f"Accuracy: {stats["accuracy"]:.2%}")
@@ -120,11 +124,11 @@ def parse_args():
     # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_sft/lora_multirule", type=str, help="Model name to load")
     
     # Single-rule datasets
-    # parser.add_argument("--dataset_path", default="data/singlerule/easy_test_155.jsonl", type=str, help="Path to dataset")
+    parser.add_argument("--dataset_path", default="data/singlerule/easy_test_155.jsonl", type=str, help="Path to dataset")
     # Multi-rule datasets
-    parser.add_argument("--dataset_path", default="data/multirule/multi_rule_test_98.jsonl", type=str, help="Path to dataset")
+    # parser.add_argument("--dataset_path", default="data/multirule/multi_rule_test_98_cot.jsonl", type=str, help="Path to dataset")
     
-    parser.add_argument("--num_examples", default=5, type=int, help="Number of examples to evaluate")
+    parser.add_argument("--num_examples", default=-1, type=int, help="Number of examples to evaluate")
     parser.add_argument("--log_level", default=None, type=str, help="Log level")
     parser.add_argument("--use_vllm", default=True, action=argparse.BooleanOptionalAction, help="Use VLLM for generation")
     parser.add_argument("--max_model_len", default=8192, type=int, help="Maximum context length for vllm. Should be based on the space of your gpu, not the model capabilities. If this is too high for the gpu, it will tell you.")
@@ -137,10 +141,9 @@ def parse_args():
     parser.add_argument("--retries", default=3, type=int, help="Number of retries for API calls")
     parser.add_argument("--use_batch_api", default=False, action=argparse.BooleanOptionalAction, help="Use batch call for API models")
     # Error bands
-    parser.add_argument("--sample_size", default=1, type=int, help="Number of samples used to calculate statistics.")
+    parser.add_argument("--sample_size", default=20, type=int, help="Number of samples used to calculate statistics.")
     parser.add_argument("--use_cot", default=False, action=argparse.BooleanOptionalAction, help="Use COT for generation")
     parser.add_argument("--multirule", default=False, action=argparse.BooleanOptionalAction, help="Use multirule evaluation")
-    parser.add_argument("--llamaguard", default=False, action=argparse.BooleanOptionalAction, help="Use LlamaGuard evaluation")
     return parser.parse_args()
 
 if __name__ == "__main__":

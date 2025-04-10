@@ -134,8 +134,10 @@ def main(args):
                 "torchtune_root": args.torchtune_root,
             }
             if args.combine:
-                non_cot_filepath = preprocess_dataset(**kwargs, add_cot=False)
-                cot_filepath = preprocess_dataset(**kwargs, add_cot=True)
+                kwargs["add_cot"] = False
+                non_cot_filepath = preprocess_dataset(**kwargs)
+                kwargs["add_cot"] = True
+                cot_filepath = preprocess_dataset(**kwargs)
                 file_path = combine_datasets(non_cot_filepath, cot_filepath)
             else:
                 file_path = preprocess_dataset(**kwargs)
@@ -163,17 +165,17 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", default="data", type=str)
     parser.add_argument("--train_size", default=10000, type=int)
-    parser.add_argument("--subsets", type=list, default=["easy"])
-    parser.add_argument("--splits", type=list, default=["train", "validation", "test"])
-    # parser.add_argument("--subsets", type=list, default=["multi_rule"])
-    # parser.add_argument("--splits", type=list, default=["train", "test"])
+    # parser.add_argument("--subsets", type=list, default=["easy"])
+    # parser.add_argument("--splits", type=list, default=["train", "validation", "test"])
+    parser.add_argument("--subsets", type=list, default=["multi_rule"])
+    parser.add_argument("--splits", type=list, default=["train", "test"])
     parser.add_argument("--extra_examples", default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument("--multirule", default=False, action=argparse.BooleanOptionalAction)
-    parser.add_argument("--add_cot", default=False, action=argparse.BooleanOptionalAction)
-    parser.add_argument("--skip_explanations", default=False, action=argparse.BooleanOptionalAction)
-    parser.add_argument("--torchtune", default=False, action=argparse.BooleanOptionalAction)
-    parser.add_argument("--torchtune_root", default="../torchtune", type=str)
-    parser.add_argument("--combine", default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument("--add_cot", default=False, action=argparse.BooleanOptionalAction, help="Add COTs to the beginning of output in the dataset")
+    parser.add_argument("--skip_explanations", default=False, action=argparse.BooleanOptionalAction, help="Skip the explanation section at the end of the output")
+    parser.add_argument("--torchtune", default=False, action=argparse.BooleanOptionalAction, help="Use the torchtune format for expected column names in the dataset.")
+    parser.add_argument("--torchtune_root", default="../torchtune", type=str, help="Path to the torchtune repo for saving the dataset. Only used if --torchtune is set.")
+    parser.add_argument("--combine", default=False, action=argparse.BooleanOptionalAction, help="Combine the COT and non-COT datasets")
     return parser.parse_args()
 
 

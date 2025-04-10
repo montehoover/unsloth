@@ -85,6 +85,12 @@ def get_stats(outputs, dataset, multirule=False):
         ground_truth_text = example[UNSLOTH_OUTPUT_FIELD]
         ground_truth_label = extract_xml_answer(ground_truth_text, opening, closing)
         predicted_label = extract_xml_answer(output_text, opening, closing)
+        
+        # Thing for GuardReasoner
+        # if "PASS" in output_text:
+        #     predicted_label = "PASS"
+        # else:
+        #     predicted_label = "FAIL"
 
         ground_truth_labels.append(ground_truth_label)
         predicted_labels.append(predicted_label)
@@ -221,8 +227,8 @@ def get_multirule_output(
 
     # Format in xml tags
     cot_block = f"{COT_OPENING}\n{cot}\n{COT_CLOSING}\n" if add_cot else ""
-    label_block = f"{LABEL_OPENING}\n{allpass_label}\n{LABEL_CLOSING}"
-    rules_block = f"{RULES_OPENING}\n{','.join(map(str, violated_rules))}\n{RULES_CLOSING}" if violated_rules else ""
+    label_block = f"{LABEL_OPENING}\n{allpass_label}\n{LABEL_CLOSING}\n"
+    rules_block = f"{RULES_OPENING}\n{','.join(map(str, violated_rules))}\n{RULES_CLOSING}\n" if violated_rules else ""
     explanation_blocks = ""
     for i in range(len(violated_rules)):
         rule_number = violated_rules[i]
@@ -234,9 +240,9 @@ def get_multirule_output(
             f"{EXPLANATION_OPENING}\n{explanation}\n{EXPLANATION_CLOSING}\n"
         )
     if skip_explanations:
-        output = f"{cot_block}\n{label_block}"
+        output = f"{cot_block}{label_block}"
     else:
-        output = f"{cot_block}\n{label_block}\n{rules_block}\n{explanation_blocks}"
+        output = f"{cot_block}{label_block}{rules_block}{explanation_blocks}"
     return output
 
 def get_singlerule_examples(rules, labels, explanations, discussions, dialogue_turns, num_rules, num_turns, input_field, output_field):
