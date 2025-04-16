@@ -57,6 +57,7 @@ def main(args):
     # messages = [f"<s>[INST]{sys_prompt}\n{x[UNSLOTH_INPUT_FIELD]}[/INST]" for x in dataset]
 
     accuracies = []
+    f1_scores = []
     false_positives = 0
     false_negatives = 0
     missing_labels = 0
@@ -72,7 +73,7 @@ def main(args):
         stats = get_stats(outputs, dataset, multirule=args.multirule)
 
         accuracies.append(stats["accuracy"])
-        print(f"Accuracy: {stats['accuracy']:.2%}")
+        f1_scores.append(stats["f1_score"])
 
         false_positives += len(stats["false_positives"])
         false_negatives += len(stats["false_negatives"])
@@ -82,12 +83,15 @@ def main(args):
         false_negative_examples.extend(stats["false_negatives"])
         missing_label_examples.extend(stats["nulls"])
 
+        # logger.info(f"{json.dumps(outputs[0], indent=4)}")
+
     if missing_label_examples:
         logger.info(json.dumps(outputs[missing_label_examples[0]], indent=4))
     logger.info(f"Raw accuracy per sample: {accuracies}")
     accuracies = np.array(accuracies)
-    logger.info(f"Accuracy: {stats["accuracy"]:.2%}")
-    logger.info(f"F1 Score: {stats["f1_score"]:.2%}")
+    f1_scores = np.array(f1_scores)
+    logger.info(f"Accuracy: {np.mean(accuracies):.2%} ")
+    logger.info(f"F1 Score: {np.mean(f1_scores):.2%}")
     logger.info(f"Accuracy standard deviation = {accuracies.std():.2%}")
     logger.info(f"False Positives: {false_positives} ({false_positives / args.sample_size:0.2f} per sample)")
     logger.info(f"False Negatives: {false_negatives} ({false_negatives / args.sample_size:0.2f} per sample)")
@@ -112,16 +116,18 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Convert model to HuggingFace format")
     # parser.add_argument('--model', default="gpt-4o-mini", type=str, help="Model name to load")
     # parser.add_argument('--model', default="meta-llama/meta-Llama-3.1-8B-Instruct", type=str, help="Model name to load")
-    parser.add_argument("--model", default="meta-llama/Llama-Guard-3-8B", type=str, help="Model name to load")
+    # parser.add_argument("--model", default="meta-llama/Llama-Guard-3-8B", type=str, help="Model name to load")
     
     # Single-rule models
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", type=str, help="Model name to load")
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_grpo/lora_7500/epoch_1", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_grpo/lora_7500", type=str, help="Model name to load")
+
     # Multi-rule models
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", type=str, help="Model name to load")
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
     # parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct", type=str, help="Model name to load")
-    # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_sft/lora_multirule", type=str, help="Model name to load")
+    parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_sft/lora_multirule_v2", type=str, help="Model name to load")
+    # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_sft/lora_multirule_v2", type=str, help="Model name to load")
     
     # Single-rule datasets
     parser.add_argument("--dataset_path", default="data/singlerule/easy_test_155.jsonl", type=str, help="Path to dataset")
