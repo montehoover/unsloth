@@ -30,7 +30,8 @@ class ModelWrapper:
         else:
             return [
                 {'role': 'system', 'content': system_content},
-                {'role': 'user', 'content': user_content}
+                {'role': 'user', 'content': user_content},
+                {'role': 'assistant', 'content': LABEL_OPENING},
             ]
 
     def get_message_template_cot(self, system_content, user_content):
