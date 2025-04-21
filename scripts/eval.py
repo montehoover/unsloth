@@ -3,11 +3,14 @@ import json
 import os
 import datasets
 import uuid
+import matplotlib as mpl
 import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
-from constants import LLAMAGUARD_TEMPLATE, MULTIRULE_SYSTEM_PROMPT_V2, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, UNSLOTH_INPUT_FIELD
-from helpers import apply_llamaguard_template, confirm_model_compatibility, get_stats, confirm_dataset_compatibility, map_llamaguard_output
+from constants import LLAMAGUARD_TEMPLATE, METADATA, MULTIRULE_SYSTEM_PROMPT_V2, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, UNSLOTH_INPUT_FIELD
+from helpers import ComplianceProjectError, apply_llamaguard_template, configure_logging, confirm_model_compatibility, get_analysis, get_stats, confirm_dataset_compatibility, map_llamaguard_output, save_results
 
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
@@ -78,7 +81,6 @@ def main(args):
 
         accuracies.append(stats["accuracy"])
         f1_scores.append(stats["f1_score"])
-
         false_positives += len(stats["false_positives"])
         false_negatives += len(stats["false_negatives"])
         missing_labels += len(stats["nulls"])
@@ -86,8 +88,6 @@ def main(args):
         false_positive_examples.extend(stats["false_positives"])
         false_negative_examples.extend(stats["false_negatives"])
         missing_label_examples.extend(stats["nulls"])
-
-        # logger.info(f"{json.dumps(outputs[0], indent=4)}")
 
     if missing_label_examples:
         logger.info(json.dumps(outputs[missing_label_examples[0]], indent=4))
@@ -104,17 +104,32 @@ def main(args):
     logger.info(f"False Negative examples: {sorted(false_negative_examples)}")
     logger.info(f"Missing expected label examples: {sorted(missing_label_examples)}")
 
-    # Save outputs to disk as a log
-    datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"log/{args.model}_{args.dataset_path}_{uuid.uuid4()}.jsonl")
+    # Save outputs to disk
+    parts = args.model.split("/")
+    model_name = f"{parts[parts.index("models") + 1]}_ours" if "models" in parts and parts.index("models") < len(parts) - 1 else args.model
+    output_path = f"log/{model_name}/{uuid.uuid4()}"
+    datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"{output_path}/outputs.jsonl")
+
+    # Do analysis over length of dialogues and length of rules and stuff
+    if args.handcrafted_analysis:
+        wrong_predictions = false_positive_examples + false_negative_examples
+        analysis_dict = get_analysis(dataset, wrong_predictions)
+        # Log median values
+        medians = {k: v for k, v in analysis_dict.items() if k.endswith('_median')}
+        for key, value in medians.items():
+            logger.info(f"Median {key}: {value}")
+        # Log counts for business_impact and failure_mode categories
+        if "business_impact_categories" in analysis_dict:
+            for category in analysis_dict["business_impact_categories"]:
+                count = analysis_dict.get(category, 0)
+                logger.info(f"Business Impact Category '{category}': {count}")
+        if "failure_mode_categories" in analysis_dict:
+            for category in analysis_dict["failure_mode_categories"]:
+                count = analysis_dict.get(category, 0)
+                logger.info(f"Failure Mode Category '{category}': {count}")
+        save_results(analysis_dict, "log", output_path, model_name, np.mean(accuracies), accuracies.std(), outputs)
     
-def configure_logging(log_level=None):
-    # Determine log level: CLI argument > Environment variable > Default (INFO)
-    log_level = (log_level or os.getenv("LOG_LEVEL", "INFO")).upper()
-    logging.basicConfig(
-        level=log_level,
-        format="{name}:{levelname}: {message}",
-        style="{"
-    )
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert model to HuggingFace format")
@@ -125,22 +140,22 @@ def parse_args():
     # Single-rule models
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", type=str, help="Model name to load")
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_grpo/lora_7500/epoch_1", type=str, help="Model name to load")
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_grpo/lora_7500", type=str, help="Model name to load")
-
     # Multi-rule models
+    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
     # parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct", type=str, help="Model name to load")
-    # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_sft/lora_multirule_v2", type=str, help="Model name to load")
-    # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_sft/lora_multirule_v2", type=str, help="Model name to load")
+    # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_sft/lora_multirule", type=str, help="Model name to load")
     
     # Single-rule datasets
-    # parser.add_argument("--dataset_path", default="data/singlerule/easy_test_155.jsonl", type=str, help="Path to dataset")
+    # parser.add_argument("--dataset_path", default="output/handcrafted/test.jsonl", type=str, help="Path to dataset")
     # Multi-rule datasets
     parser.add_argument("--dataset_path", default="data/multirule/multi_rule_test_98_cot.jsonl", type=str, help="Path to dataset")
     parser.add_argument("--subset", default=None, type=str, help="Subset of the dataset to use")
+    # parser.add_argument("--dataset_path", default="tomg-group-umd/compliance", type=str, help="Path to dataset")
+    # parser.add_argument("--subset", default="handcrafted", type=str, help="Subset of the dataset to use")
     
     parser.add_argument("--num_examples", default=-1, type=int, help="Number of examples to evaluate")
-    parser.add_argument("--log_level", default=None, type=str, help="Log level")
+    parser.add_argument("--log_level", default=None, type=str, help="Log level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "debug", "info", "warning", "error", "critical"])
     parser.add_argument("--use_vllm", default=True, action=argparse.BooleanOptionalAction, help="Use VLLM for generation")
     parser.add_argument("--max_model_len", default=8192, type=int, help="Maximum context length for vllm. Should be based on the space of your gpu, not the model capabilities. If this is too high for the gpu, it will tell you.")
     # Generation parameters taken from gpt-fast
@@ -155,9 +170,9 @@ def parse_args():
     parser.add_argument("--sample_size", default=1, type=int, help="Number of samples used to calculate statistics.")
     parser.add_argument("--use_cot", default=False, action=argparse.BooleanOptionalAction, help="Use COT for generation")
     parser.add_argument("--multirule", default=False, action=argparse.BooleanOptionalAction, help="Use multirule evaluation")
+    parser.add_argument("--handcrafted_analysis", default=False, action=argparse.BooleanOptionalAction, help="do handcrafted analysis")
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
-    configure_logging(args.log_level)
     main(args)

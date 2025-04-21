@@ -34,6 +34,7 @@ from constants import (
     CONVERSATION_START,
 )
 import logging
+import numpy as np
 logger = logging.getLogger(__name__)
 
 
@@ -398,11 +399,8 @@ def get_analysis(dataset, wrong_predictions):
     return counts
 
 
-def save_results(analysis_dict, output_root, model_name, total_accuracy, stdev, outputs):
-    # Create a model-specific output subdirectory under output_root.
-    output_path = f"{output_root}/{model_name}/{uuid.uuid4()}"
-    
-    # --- JSON for generation outputs and analysis_dict ---
+def save_results(analysis_dict, output_root, output_path, model_name, total_accuracy, stdev, outputs):    
+    # --- JSONs for generation outputs and analysis_dict ---
     datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"{output_path}/outputs.jsonl")
     with open(f"{output_path}/analysis.json", "w") as f:
         json.dump(analysis_dict, f, indent=4)
