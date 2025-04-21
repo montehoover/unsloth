@@ -17,10 +17,14 @@ logger = logging.getLogger(__name__)
 
 
 def main(args):
-    confirm_dataset_compatibility(args.dataset_path, args.multirule)
+    configure_logging(args.log_level)
 
     # Dataset
-    dataset = datasets.load_dataset("json", data_files={"placeholder": args.dataset_path})["placeholder"]
+    if args.subset is None:
+        dataset = datasets.load_dataset("json", data_files={"test": args.dataset_path})["test"]
+    else:
+        dataset = datasets.load_dataset(args.dataset_path, args.subset, split="test")
+    confirm_dataset_compatibility(dataset, args.multirule)
     n = args.num_examples if args.num_examples > 0 and args.num_examples < len(dataset) else len(dataset)
     # Shuffle to ensure we get a random subset. Don't shuffle if we're using the whole thing so we can keep track of indices for frequent misclassifications.
     if n < len(dataset):
@@ -114,7 +118,7 @@ def configure_logging(log_level=None):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert model to HuggingFace format")
-    # parser.add_argument('--model', default="gpt-4o-mini", type=str, help="Model name to load")
+    parser.add_argument('--model', default="gpt-4o-mini", type=str, help="Model name to load")
     # parser.add_argument('--model', default="meta-llama/meta-Llama-3.1-8B-Instruct", type=str, help="Model name to load")
     # parser.add_argument("--model", default="meta-llama/Llama-Guard-3-8B", type=str, help="Model name to load")
     
@@ -126,13 +130,14 @@ def parse_args():
 
     # Multi-rule models
     # parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct", type=str, help="Model name to load")
-    parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_sft/lora_multirule_v2", type=str, help="Model name to load")
+    # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_sft/lora_multirule_v2", type=str, help="Model name to load")
     # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_sft/lora_multirule_v2", type=str, help="Model name to load")
     
     # Single-rule datasets
     # parser.add_argument("--dataset_path", default="data/singlerule/easy_test_155.jsonl", type=str, help="Path to dataset")
     # Multi-rule datasets
     parser.add_argument("--dataset_path", default="data/multirule/multi_rule_test_98_cot.jsonl", type=str, help="Path to dataset")
+    parser.add_argument("--subset", default=None, type=str, help="Subset of the dataset to use")
     
     parser.add_argument("--num_examples", default=-1, type=int, help="Number of examples to evaluate")
     parser.add_argument("--log_level", default=None, type=str, help="Log level")
@@ -147,7 +152,7 @@ def parse_args():
     parser.add_argument("--retries", default=3, type=int, help="Number of retries for API calls")
     parser.add_argument("--use_batch_api", default=False, action=argparse.BooleanOptionalAction, help="Use batch call for API models")
     # Error bands
-    parser.add_argument("--sample_size", default=20, type=int, help="Number of samples used to calculate statistics.")
+    parser.add_argument("--sample_size", default=1, type=int, help="Number of samples used to calculate statistics.")
     parser.add_argument("--use_cot", default=False, action=argparse.BooleanOptionalAction, help="Use COT for generation")
     parser.add_argument("--multirule", default=False, action=argparse.BooleanOptionalAction, help="Use multirule evaluation")
     return parser.parse_args()

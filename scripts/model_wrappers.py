@@ -11,7 +11,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import LLM, SamplingParams
 
-from constants import COT_OPENING
+from constants import COT_OPENING, LABEL_OPENING
 
 import logging
 logger = logging.getLogger(__name__)

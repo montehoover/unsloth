@@ -1,14 +1,20 @@
 import ast
 import json
+import os
 import random
 import re
+import uuid
 import datasets
+import matplotlib as mpl
+from matplotlib import pyplot as plt
+import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score
 from constants import (
     COT_CLOSING,
     COT_OPENING,
     EXPLANATION_CLOSING,
     EXPLANATION_OPENING,
+    METADATA,
     TORCHTUNE_INPUT_FIELD,
     TORCHTUNE_OUTPUT_FIELD,
     UNSLOTH_INPUT_FIELD,
@@ -137,8 +143,7 @@ def confirm_model_compatibility(model_name, use_llamaguard):
     if not use_llamaguard and "Llama-Guard" in model_name:
         raise ComplianceProjectError(f"Gave a Llama-Guard model but didn't select llamaguard mode with --llamaguard: {model_name}")
 
-def confirm_dataset_compatibility(dataset_path, use_multirule):
-    dataset = datasets.load_dataset("json", data_files={"placeholder": dataset_path})["placeholder"]
+def confirm_dataset_compatibility(dataset, use_multirule):
     output_text = dataset[0][UNSLOTH_OUTPUT_FIELD]
     if use_multirule:
         required_tag = LABEL_OPENING
@@ -147,7 +152,7 @@ def confirm_dataset_compatibility(dataset_path, use_multirule):
     if required_tag not in output_text:
         type = "multi-rule" if use_multirule else "single-rule"
         raise ComplianceProjectError(
-            f"Selected {type} evaluation but gave {dataset_path} which does not include the expected label tag of {required_tag} needed for this type of evaluation."
+            f"Selected {type} evaluation but gave a dataset which does not include the expected label tag of {required_tag} needed for this type of evaluation."
             "\nTry looking for a dataset with 'multi_rule' in the path if you wanted multi-rule."
             )
 
@@ -362,3 +367,175 @@ def combine_datasets(non_cot_filepath, cot_filepath):
     combined_dataset.to_json(new_path)
     print(f"Saved combined dataset to {new_path}")
     return new_path
+
+
+def get_analysis(dataset, wrong_predictions):
+    assert METADATA in dataset.column_names, f"Dataset {dataset} does not have {METADATA} field"
+    counts = {}
+    for i, example in enumerate(dataset):
+        metadata = example[METADATA]
+        if i in wrong_predictions:
+            counts["business_impact_categories"] = counts.get("business_impact_categories", set()) | {metadata["business_impact"]}
+            counts["failure_mode_categories"] = counts.get("failure_mode_categories", set()) | {metadata["failure_mode"]}
+            counts[metadata["business_impact"]] = counts.get(metadata["business_impact"], 0) + 1
+            counts[metadata["failure_mode"]] = counts.get(metadata["failure_mode"], 0) + 1
+            if metadata["extra_failure_modes"] != "":
+                counts["failure_mode_categories"] = counts.get("failure_mode_categories", set()) | {metadata["extra_failure_modes"]}
+                counts[metadata["extra_failure_modes"]] = counts.get(metadata["extra_failure_modes"], 0) + 1
+            if metadata["num_counts"] != -1:
+                counts["num_counts"] = counts.get("num_counts", []) + [metadata["num_counts"]]
+            if metadata["num_hops"] != -1:
+                counts["num_hops"] = counts.get("num_counts", []) + [metadata["num_hops"]]
+            if metadata["num_turns"] != -1:
+                counts["num_turns"] = counts.get("num_counts", []) + [metadata["num_turns"]]
+            if metadata["num_rules"] != -1:
+                counts["num_rules"] = counts.get("num_counts", []) + [metadata["num_rules"]]
+            if metadata["rule_len"] != -1:
+                counts["rule_len"] = counts.get("num_counts", []) + [metadata["rule_len"]]
+    for key in ["num_counts", "num_hops", "num_turns", "num_rules", "rule_len"]:
+        if key in counts and isinstance(counts[key], list) and counts[key]:
+            counts[f"{key}_median"] = np.median(counts[key])
+    return counts
+
+
+def save_results(analysis_dict, output_root, model_name, total_accuracy, stdev, outputs):
+    # Create a model-specific output subdirectory under output_root.
+    output_path = f"{output_root}/{model_name}/{uuid.uuid4()}"
+    
+    # --- JSON for generation outputs and analysis_dict ---
+    datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"{output_path}/outputs.jsonl")
+    with open(f"{output_path}/analysis.json", "w") as f:
+        json.dump(analysis_dict, f, indent=4)
+
+    # --- Matplotlib configuration ---
+    mpl.rcParams.update({
+        # 'font.family': 'serif',
+        # 'font.serif': ['Times New Roman'],  # Academic standard font
+        'font.size': 12,
+        'axes.titlesize': 14,
+        'axes.labelsize': 14,
+        'xtick.labelsize': 12,
+        'ytick.labelsize': 12,
+        'legend.fontsize': 12,
+        'figure.dpi': 300,       # Higher resolution for publication-quality images
+        'savefig.dpi': 300,
+        'lines.linewidth': 1.5,
+        'axes.edgecolor': 'black',
+        'axes.linewidth': 1,
+        'grid.color': '0.8',     # Light gray grid lines for subtlety
+        'grid.linestyle': '--'
+    })
+    mpl.rc('font', **{'family': 'serif', 'serif': ['Computer Modern']})
+    mpl.rc('text', usetex=True)
+    
+    # --- Pie Chart for Business Impact Categories ---
+    if "business_impact_categories" in analysis_dict and analysis_dict["business_impact_categories"]:
+        business_categories = list(analysis_dict["business_impact_categories"])
+        business_counts = [analysis_dict.get(cat, 0) for cat in business_categories]
+
+        fig, ax = plt.subplots()
+        ax.pie(business_counts, labels=business_categories, autopct='%1.1f%%', startangle=90)
+        ax.set_title("Distribution of Business Impact Categories")
+        file_path = os.path.join(output_path, "business_impact_categories.png")
+        plt.savefig(file_path)
+        plt.close(fig)
+    else:
+        print("No business impact categories data available.")
+
+    # --- Pie Chart for Failure Mode Categories ---
+    if "failure_mode_categories" in analysis_dict and analysis_dict["failure_mode_categories"]:
+        failure_categories = list(analysis_dict["failure_mode_categories"])
+        failure_counts = [analysis_dict.get(cat, 0) for cat in failure_categories]
+        fig, ax = plt.subplots()
+        ax.pie(failure_counts, labels=failure_categories, autopct='%1.1f%%', startangle=90)
+        ax.set_title("Distribution of Failure Mode Categories")
+        file_path = os.path.join(output_path, "failure_mode_categories.png")
+        plt.savefig(file_path)
+        plt.close(fig)
+    else:
+        print("No failure mode categories data available.")
+
+    # --- Histograms for Numerical Metrics ---
+    numeric_keys = ['num_counts', 'num_hops', 'num_turns', 'num_rules', 'rule_len']
+    for key in numeric_keys:
+        if key in analysis_dict and isinstance(analysis_dict[key], list) and analysis_dict[key]:
+            plt.figure()
+            plt.hist(analysis_dict[key], bins=10, edgecolor='black')
+            plt.title(f"Histogram of {key}")
+            plt.xlabel(key)
+            plt.ylabel("Frequency")
+            file_path = os.path.join(output_path, f"{key}_histogram.png")
+            plt.savefig(file_path)
+            plt.close()  # Closes the current figure
+        else:
+            print(f"No numerical data available for {key}")
+
+    # --- Update results CSV ---
+    results = {}
+    medians = {key.replace('_median', ''): value 
+                     for key, value in analysis_dict.items() if key.endswith('_median')}
+    results["total_accuracy"] = total_accuracy
+    results["accuracy_std"] = stdev
+    
+    # If CSV exists, load it and append the new row. Otherwise, create a new DataFrame.
+    csv_filename = os.path.join(output_root, "results.csv")
+    new_row = pd.DataFrame([results], index=[model_name])
+    new_row.index.name = "model_name"
+    if os.path.exists(csv_filename):
+        existing_df = pd.read_csv(csv_filename, index_col=0)
+        df = pd.concat([existing_df, new_row], axis=0)
+    else:
+        df = new_row
+    df.to_csv(csv_filename, index=True)
+    
+    # --- Create LaTeX-style table as a PNG using the updated CSV DataFrame ---
+    fig, ax = plt.subplots(figsize=(max(6, len(df.columns)), 0.5 * len(df) + 1))
+    ax.axis('tight')
+    ax.axis('off')
+    table = ax.table(cellText=df.values,
+                     rowLabels=df.index,
+                     colLabels=df.columns,
+                     cellLoc='center',
+                     loc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 1.5)
+    png_filename = os.path.join(output_root, "results_table.png")
+    plt.savefig(png_filename, bbox_inches='tight')
+    plt.close(fig)
+    
+    # --- Generate LaTeX code for the updated table ---
+    latex_str = df.to_latex(header=True, index=True,
+                            caption="Median values from analysis",
+                            label="tab:medians")
+    latex_filename = os.path.join(output_root, "results.tex")
+    with open(latex_filename, "w") as f:
+        f.write(latex_str)
+
+    # --- Bar Chart for results ---
+    plt.figure(figsize=(8, 6))
+    plt.bar(df.index, df['total_accuracy'],
+        yerr=df['accuracy_std'],     # Using standard deviation as error bars
+        capsize=5,                   # Add caps to the error bars
+        color='#4D4D4D',             # Muted dark gray fill color
+        edgecolor='black',           # Black outline for the bars
+        linewidth=1.2)
+    plt.grid(True, which='both', axis='y', linestyle='--', linewidth=0.5)
+    plt.xlabel('Model')
+    plt.ylabel('Accuracy')
+    plt.tight_layout()
+    plt.savefig(f"{output_root}/results_bar_chart.png", format='png')
+
+def configure_logging(log_level=None, ext_level_bump=1):
+    # Determine log level: CLI argument > Environment variable > Default (INFO)
+    log_level = (log_level or os.getenv("LOG_LEVEL", "INFO")).upper()
+    levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+    assert log_level in levels, f"Invalid log level: {log_level}. Choose from {levels}."
+    logger.setLevel(log_level)
+    # Bump the logger for other modules to some quieter level (basicConfig sets the log level for the root logger which is used by other modules)
+    external_module_level = levels[levels.index(log_level) + ext_level_bump] if log_level != 'CRITICAL' else 'CRITICAL'
+    logging.basicConfig(
+        level=external_module_level,
+        format="{name}:{levelname}: {message}",
+        style="{"
+    )
