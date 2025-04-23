@@ -47,9 +47,7 @@ def main(args):
         model = HfModelWrapper(args.model, args.temperature, args.top_k, args.max_new_tokens)
     
     # Generation
-    sys_prompt = MULTIRULE_SYSTEM_PROMPT_V2 if args.multirule else SYSTEM_PROMPT
     if "Llama-Guard" in args.model:
-        # assert not args.multirule, "Llama-Guard isn't implemented for MultiRule evaluation yet"
         sys_prompt = LLAMAGUARD_TEMPLATE
         template_fn = apply_llamaguard_template
     elif args.multirule:
@@ -59,10 +57,7 @@ def main(args):
         sys_prompt = SYSTEM_PROMPT if args.use_cot else SYSTEM_PROMPT_NON_COT
         template_fn = model.apply_chat_template_cot if args.use_cot else model.apply_chat_template
 
-    if args.experimental:
-        messages = [template_fn(SYSTEM_PROMPT, x[UNSLOTH_INPUT_FIELD].split("Conversation:")[1].strip()) for x in dataset]
-    else:
-        messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD]) for x in dataset]
+    messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD]) for x in dataset]
 
     # A thing for WildGuard
     # messages = [f"<s>[INST]{sys_prompt}\n{x[UNSLOTH_INPUT_FIELD]}[/INST]" for x in dataset]
@@ -175,9 +170,8 @@ def parse_args():
     # Error bands
     parser.add_argument("--sample_size", default=1, type=int, help="Number of samples used to calculate statistics.")
     parser.add_argument("--use_cot", default=True, action=argparse.BooleanOptionalAction, help="Use COT for generation")
-    parser.add_argument("--multirule", default=False, action=argparse.BooleanOptionalAction, help="Use multirule evaluation")
+    parser.add_argument("--multirule", default=True, action=argparse.BooleanOptionalAction, help="Use multirule evaluation")
     parser.add_argument("--handcrafted_analysis", default=False, action=argparse.BooleanOptionalAction, help="do handcrafted analysis")
-    parser.add_argument("--experimental", default=False, action=argparse.BooleanOptionalAction, help="Use experimental stuff")
     return parser.parse_args()
 
 if __name__ == "__main__":
