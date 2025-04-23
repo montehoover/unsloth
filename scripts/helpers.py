@@ -77,12 +77,6 @@ def filter_nulls(ground_truth_labels, predicted_labels):
     return predicted_labels, nulls
 
 def get_stats(outputs, dataset, multirule=False):
-    if multirule:
-        opening = LABEL_OPENING
-        closing = LABEL_CLOSING
-    else:
-        opening = LABEL_OPENING
-        closing = LABEL_CLOSING
     ground_truth_labels = []
     predicted_labels = []
     false_negatives = []  
@@ -90,8 +84,8 @@ def get_stats(outputs, dataset, multirule=False):
     rule_violations = {"missed": 0, "extra": 0}
     for i, (example, output_text) in enumerate(zip(dataset, outputs)):
         ground_truth_text = example[UNSLOTH_OUTPUT_FIELD]
-        ground_truth_label = extract_xml_answer(ground_truth_text, opening, closing)
-        predicted_label = extract_xml_answer(output_text, opening, closing)
+        ground_truth_label = extract_xml_answer(ground_truth_text, LABEL_OPENING, LABEL_CLOSING)
+        predicted_label = extract_xml_answer(output_text, LABEL_OPENING, LABEL_CLOSING)
         
         # Thing for GuardReasoner
         # if "PASS" in output_text:
@@ -112,6 +106,7 @@ def get_stats(outputs, dataset, multirule=False):
         if predicted_label == "FAIL" and ground_truth_label == "PASS":
             false_positives.append(i)
 
+    percent_pass = ground_truth_labels.count("PASS") / len(ground_truth_labels)
     predicted_labels, nulls = filter_nulls(ground_truth_labels, predicted_labels)
     accuracy = accuracy_score(ground_truth_labels, predicted_labels)
     try:
@@ -123,7 +118,7 @@ def get_stats(outputs, dataset, multirule=False):
                 If ground_truth_labels are not all PASS/FAIL, then there was a mismatch between the dataset and expected xml tags.
                 If predicted_labels are not all PASS/FAIL, then something went wrong in filter_nulls().
                 Multi-rule eval: {multirule}
-                Expected xml tags: {opening} {closing}
+                Expected xml tags: {LABEL_OPENING} {LABEL_CLOSING}
                 ground_truth_labels: {ground_truth_labels}
                 predicted_labels: {predicted_labels}
                 """) from None
@@ -134,7 +129,8 @@ def get_stats(outputs, dataset, multirule=False):
         "false_negatives": false_negatives,
         "nulls": nulls,
         "missed_rules": rule_violations["missed"],
-        "extra_rules": rule_violations["extra"]
+        "extra_rules": rule_violations["extra"],
+        "percent_pass": percent_pass,
     }
     return stats
 
@@ -398,12 +394,18 @@ def get_analysis(dataset, wrong_predictions):
             counts[f"{key}_median"] = np.median(counts[key])
     return counts
 
+class JsonSetEncoder(json.JSONEncoder):
+    """Allows json.dump to handle dictionaries that contain sets."""
+    def default(self, obj):
+        if isinstance(obj, set):
+            return list(obj)
+        return super().default(obj)
 
 def save_results(analysis_dict, output_root, output_path, model_name, total_accuracy, stdev, outputs):    
     # --- JSONs for generation outputs and analysis_dict ---
     datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"{output_path}/outputs.jsonl")
     with open(f"{output_path}/analysis.json", "w") as f:
-        json.dump(analysis_dict, f, indent=4)
+        json.dump(analysis_dict, f, indent=4, cls=JsonSetEncoder)
 
     # --- Matplotlib configuration ---
     mpl.rcParams.update({
@@ -525,15 +527,15 @@ def save_results(analysis_dict, output_root, output_path, model_name, total_accu
     plt.savefig(f"{output_root}/results_bar_chart.png", format='png')
 
 def configure_logging(log_level=None, ext_level_bump=1):
-    # Determine log level: CLI argument > Environment variable > Default (INFO)
-    log_level = (log_level or os.getenv("LOG_LEVEL", "INFO")).upper()
-    levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
-    assert log_level in levels, f"Invalid log level: {log_level}. Choose from {levels}."
-    logger.setLevel(log_level)
-    # Bump the logger for other modules to some quieter level (basicConfig sets the log level for the root logger which is used by other modules)
-    external_module_level = levels[levels.index(log_level) + ext_level_bump] if log_level != 'CRITICAL' else 'CRITICAL'
+    # Create a custom level that is between INFO and WARNING
+    logging.addLevelName(25, "NOTICE")
+    notice = lambda self, message, *args, **kwargs: self._log(25, message, args, **kwargs)
+    logging.Logger.notice = notice
+
+    # Determine log level: CLI argument > Environment variable > Default (NOTICE)
+    log_level = (log_level or os.getenv("LOG_LEVEL", "NOTICE")).upper()
     logging.basicConfig(
-        level=external_module_level,
+        level=log_level,
         format="{name}:{levelname}: {message}",
         style="{"
     )

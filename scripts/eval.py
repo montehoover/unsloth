@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import time
 import datasets
 import uuid
 import matplotlib as mpl
@@ -9,7 +10,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
-from constants import LLAMAGUARD_TEMPLATE, METADATA, MULTIRULE_SYSTEM_PROMPT_V2, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, UNSLOTH_INPUT_FIELD
+from constants import LLAMAGUARD_TEMPLATE, METADATA, MULTIRULE_SYSTEM_PROMPT_V2, MULTIRULE_SYSTEM_PROMPT_V2_NON_COT, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, SYSTEM_PROMPT_EXPERIMENTAL, SYSTEM_PROMPT_EXPERIMENTAL2, SYSTEM_PROMPT_NON_COT, UNSLOTH_INPUT_FIELD
 from helpers import ComplianceProjectError, apply_llamaguard_template, configure_logging, confirm_model_compatibility, get_analysis, get_stats, confirm_dataset_compatibility, map_llamaguard_output, save_results
 
 from dotenv import load_dotenv, find_dotenv
@@ -52,13 +53,16 @@ def main(args):
         sys_prompt = LLAMAGUARD_TEMPLATE
         template_fn = apply_llamaguard_template
     elif args.multirule:
-        sys_prompt = MULTIRULE_SYSTEM_PROMPT_V2
+        sys_prompt = MULTIRULE_SYSTEM_PROMPT_V2 if args.use_cot else MULTIRULE_SYSTEM_PROMPT_V2_NON_COT
         template_fn = model.apply_chat_template_cot if args.use_cot else model.apply_chat_template
     else:
-        sys_prompt = SYSTEM_PROMPT
-        template_fn = model.apply_chat_template
+        sys_prompt = SYSTEM_PROMPT if args.use_cot else SYSTEM_PROMPT_NON_COT
+        template_fn = model.apply_chat_template_cot if args.use_cot else model.apply_chat_template
 
-    messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD]) for x in dataset]
+    if args.experimental:
+        messages = [template_fn(SYSTEM_PROMPT, x[UNSLOTH_INPUT_FIELD].split("Conversation:")[1].strip()) for x in dataset]
+    else:
+        messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD]) for x in dataset]
 
     # A thing for WildGuard
     # messages = [f"<s>[INST]{sys_prompt}\n{x[UNSLOTH_INPUT_FIELD]}[/INST]" for x in dataset]
@@ -90,25 +94,27 @@ def main(args):
         missing_label_examples.extend(stats["nulls"])
 
     if missing_label_examples:
-        logger.info(json.dumps(outputs[missing_label_examples[0]], indent=4))
-    logger.info(f"Raw accuracy per sample: {accuracies}")
+        logger.notice(json.dumps(outputs[missing_label_examples[0]], indent=4))
+    logger.notice(f"Raw accuracy per sample: {accuracies}")
     accuracies = np.array(accuracies)
     f1_scores = np.array(f1_scores)
-    logger.info(f"Accuracy: {np.mean(accuracies):.2%} ")
-    logger.info(f"F1 Score: {np.mean(f1_scores):.2%}")
-    logger.info(f"Accuracy standard deviation = {accuracies.std():.2%}")
-    logger.info(f"False Positives: {false_positives} ({false_positives / args.sample_size:0.2f} per sample)")
-    logger.info(f"False Negatives: {false_negatives} ({false_negatives / args.sample_size:0.2f} per sample)")
-    logger.info(f"Missing expected label: {missing_labels} ({missing_labels  / args.sample_size:0.2f} per sample)")
-    logger.info(f"False Positive examples: {sorted(false_positive_examples)}")
-    logger.info(f"False Negative examples: {sorted(false_negative_examples)}")
-    logger.info(f"Missing expected label examples: {sorted(missing_label_examples)}")
+    logger.notice(f"Accuracy: {np.mean(accuracies):.2%} ")
+    logger.notice(f"F1 Score: {np.mean(f1_scores):.2%}")
+    logger.notice(f"Accuracy standard deviation = {accuracies.std():.2%}")
+    logger.notice(f"False Positives: {false_positives} ({false_positives / args.sample_size:0.2f} per sample)")
+    logger.notice(f"False Negatives: {false_negatives} ({false_negatives / args.sample_size:0.2f} per sample)")
+    logger.notice(f"Missing expected label: {missing_labels} ({missing_labels  / args.sample_size:0.2f} per sample)")
+    logger.notice(f"False Positive examples: {sorted(false_positive_examples)}")
+    logger.notice(f"False Negative examples: {sorted(false_negative_examples)}")
+    logger.notice(f"Missing expected label examples: {sorted(missing_label_examples)}")
+    logger.notice(f"Dataset balance: PASS: {stats["percent_pass"]:.1%} FAIL: {1 - stats["percent_pass"]:.1%}")
 
     # Save outputs to disk
     parts = args.model.split("/")
     model_name = f"{parts[parts.index("models") + 1]}_ours" if "models" in parts and parts.index("models") < len(parts) - 1 else args.model
-    output_path = f"log/{model_name}/{uuid.uuid4()}"
+    output_path = f"log/{model_name}/{time.time_ns()}"
     datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"{output_path}/outputs.jsonl")
+    logger.notice(f"Outputs saved to {output_path}/outputs.jsonl")
 
     # Do analysis over length of dialogues and length of rules and stuff
     if args.handcrafted_analysis:
@@ -117,16 +123,16 @@ def main(args):
         # Log median values
         medians = {k: v for k, v in analysis_dict.items() if k.endswith('_median')}
         for key, value in medians.items():
-            logger.info(f"Median {key}: {value}")
+            logger.notice(f"Median {key}: {value}")
         # Log counts for business_impact and failure_mode categories
         if "business_impact_categories" in analysis_dict:
             for category in analysis_dict["business_impact_categories"]:
                 count = analysis_dict.get(category, 0)
-                logger.info(f"Business Impact Category '{category}': {count}")
+                logger.notice(f"Business Impact Category '{category}': {count}")
         if "failure_mode_categories" in analysis_dict:
             for category in analysis_dict["failure_mode_categories"]:
                 count = analysis_dict.get(category, 0)
-                logger.info(f"Failure Mode Category '{category}': {count}")
+                logger.notice(f"Failure Mode Category '{category}': {count}")
         save_results(analysis_dict, "log", output_path, model_name, np.mean(accuracies), accuracies.std(), outputs)
     
 
@@ -168,9 +174,10 @@ def parse_args():
     parser.add_argument("--use_batch_api", default=False, action=argparse.BooleanOptionalAction, help="Use batch call for API models")
     # Error bands
     parser.add_argument("--sample_size", default=1, type=int, help="Number of samples used to calculate statistics.")
-    parser.add_argument("--use_cot", default=False, action=argparse.BooleanOptionalAction, help="Use COT for generation")
+    parser.add_argument("--use_cot", default=True, action=argparse.BooleanOptionalAction, help="Use COT for generation")
     parser.add_argument("--multirule", default=False, action=argparse.BooleanOptionalAction, help="Use multirule evaluation")
     parser.add_argument("--handcrafted_analysis", default=False, action=argparse.BooleanOptionalAction, help="do handcrafted analysis")
+    parser.add_argument("--experimental", default=False, action=argparse.BooleanOptionalAction, help="Use experimental stuff")
     return parser.parse_args()
 
 if __name__ == "__main__":
