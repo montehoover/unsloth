@@ -10,7 +10,6 @@ python scripts/eval.py --sample_size 1 --dataset_path tomg-group-umd/compliance 
 python scripts/eval.py --sample_size 1 --dataset_path tomg-group-umd/compliance --subset wildguard  --model /fs/cml-projects/guardian_models/models/Qwen2.5-1.5B-Instruct/huggingface_grpo/lora_multirule_v2
 python scripts/eval.py --sample_size 1 --dataset_path tomg-group-umd/compliance --subset wildguard  --model /fs/cml-projects/guardian_models/models/Qwen2.5-1.5B-Instruct/huggingface_grpo/lora_wildguard
 
-
 python scripts/eval.py --sample_size 1 --dataset_path tomg-group-umd/compliance --subset wildguard  --model Qwen/Qwen2.5-3B-Instruct
 python scripts/eval.py --sample_size 1 --dataset_path tomg-group-umd/compliance --subset wildguard  --model /fs/cml-projects/guardian_models/models/Qwen2.5-3B-Instruct/huggingface_grpo/lora_multirule_v2
 python scripts/eval.py --sample_size 1 --dataset_path tomg-group-umd/compliance --subset wildguard  --model /fs/cml-projects/guardian_models/models/Qwen2.5-3B-Instruct/huggingface_grpo/lora_wildguard
