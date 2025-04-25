@@ -19,6 +19,8 @@ EXPLANATION_OPENING = "<explanation>"
 EXPLANATION_CLOSING = "</explanation>"
 
 NUM_RULES_METADATA = "num_rules"
+NUM_TURNS_METADATA = "num_turns"
+NUM_TOKENS_METADATA = "num_tokens"
 METADATA = "metadata"
 
 RULE_START = 'Rules Agent must follow:'

@@ -35,6 +35,7 @@ from constants import (
 )
 import logging
 import numpy as np
+from transformers import AutoTokenizer
 logger = logging.getLogger(__name__)
 
 
@@ -193,7 +194,7 @@ def get_cot(discussions, explanations, nlp_processor, num_sentences=4):
     return enumerated_cot
 
 
-def get_multirule_input(rules, labels, explanations, dialogue):
+def get_multirule_input(rules, dialogue):
     enumerated_rules = '\n'.join(f"{i+1}. {rule}" for i, rule in enumerate(rules))
     input = f"{RULE_START}\n{enumerated_rules}\n\n{CONVERSATION_START}\n{dialogue}"
     return input
@@ -204,47 +205,64 @@ def get_multirule_output(
         discussions, 
         dialogue_turns, 
         num_rules, 
-        num_turns, 
-        add_cot=False, 
+        num_labeled_turns, 
+        add_cot=False,
+        add_explanations=False, 
         nlp_processor=None, 
-        skip_explanations=False,
-        num_sentences=4
+        num_sentences=4,
+        rules_first=False,
     ):
+    if add_cot and add_explanations:
+        raise ComplianceProjectError("Cannot set both add_cot and add_explanations to True. Choose one method for displaying reasoning.")
+    
+    # Initialize variables for output
     allpass_label = "PASS"
     violated_rules = []
-    violation_lines = []
+    # violation_lines = []
     violation_explanations = []
 
+    logger.info(f"Checking for rule violations in {num_rules} rules and {num_labeled_turns} turns...")
     for i in range(num_rules):
-        for j in range(num_turns):
+        for j in range(num_labeled_turns):
             if labels[i][j] == "FAIL":
                 allpass_label = "FAIL"
                 violated_rules.append(i+1)
-                violation_lines.append(dialogue_turns[j])
+                # violation_lines.append(dialogue_turns[j])
                 violation_explanations.append(explanations[i][j])
                 break # We capture the first violation of a given rule and then move to the next rule
     
+    # Formatting
+    violated_rules = ",".join(map(str, violated_rules))
+    violation_explanations = "\n".join(violation_explanations)
     if add_cot:
+        logger.info(f"Using Spacy to extract the first {num_sentences} sentences from each rule discussion for COT.")
         cot = get_cot(discussions, explanations, nlp_processor, num_sentences=num_sentences)
 
     # Format in xml tags
+    # Note that cot_block and explanation block use the same tags, but the explanations have shorter text inside
     cot_block = f"{COT_OPENING}\n{cot}\n{COT_CLOSING}\n" if add_cot else ""
     label_block = f"{LABEL_OPENING}\n{allpass_label}\n{LABEL_CLOSING}\n"
-    rules_block = f"{RULES_OPENING}\n{','.join(map(str, violated_rules))}\n{RULES_CLOSING}\n" if violated_rules else ""
-    explanation_blocks = ""
-    for i in range(len(violated_rules)):
-        rule_number = violated_rules[i]
-        line_in_transcript = violation_lines[i]
-        explanation = violation_explanations[i]
-        explanation_blocks += (
-            f"{RULE_NUMBER_OPENING}\n{rule_number}\n{RULE_NUMBER_CLOSING}\n"
-            f"{LINE_OPENING}\n{line_in_transcript}\n{LINE_CLOSING}\n"
-            f"{EXPLANATION_OPENING}\n{explanation}\n{EXPLANATION_CLOSING}\n"
-        )
-    if skip_explanations:
-        output = f"{cot_block}{label_block}"
+    rules_block = f"{RULES_OPENING}\n{violated_rules or "None"}\n{RULES_CLOSING}\n"
+    explanation_block = f"{COT_OPENING}\n{violation_explanations}\n{COT_CLOSING}\n" if violated_rules and add_explanations else ""
+    # Below is our older, more elaborate way of doing it:
+    # explanation_block = ""
+    # for i in range(len(violated_rules)):
+    #     rule_number = violated_rules[i]
+    #     line_in_transcript = violation_lines[i]
+    #     explanation = violation_explanations[i]
+    #     explanation_block += (
+    #         f"{RULE_NUMBER_OPENING}\n{rule_number}\n{RULE_NUMBER_CLOSING}\n"
+    #         f"{LINE_OPENING}\n{line_in_transcript}\n{LINE_CLOSING}\n"
+    #         f"{EXPLANATION_OPENING}\n{explanation}\n{EXPLANATION_CLOSING}\n"
+    #     )
+
+    # The default looks something like this: 
+    #[<reasoning>...</reasoning>]  <answer>...</answer>  <rules_violated>...</rules_violated>  [<reasoning>...</reasoning>]
+    if rules_first:
+        output = f"{cot_block}{rules_block}{label_block}{explanation_block}"
     else:
-        output = f"{cot_block}{label_block}{rules_block}{explanation_blocks}"
+         output = f"{cot_block}{label_block}{rules_block}{explanation_block}"
+
     return output
 
 def get_singlerule_examples(rules, labels, explanations, discussions, dialogue_turns, num_rules, num_turns, input_field, output_field):
@@ -278,9 +296,14 @@ def get_cleaned_fields(example, example_index):
             cleaned_explanations.append([clean_explanation(explanation) for explanation in parse_string_list(explanations[i])])
             cleaned_discussions.append([clean_explanation(discussion) for discussion in parse_string_list(discussions[i])])
         num_rules = len(cleaned_rules)
-        num_turns = len(cleaned_labels[0])
-        dialogue_turns = get_dialogue_turns(dialogue, expected_turns=num_turns, example_index=example_index)
-        return cleaned_rules, cleaned_labels, cleaned_explanations, cleaned_discussions, dialogue, dialogue_turns, num_rules, num_turns
+        num_labeled_turns = len(cleaned_labels[0])
+        dialogue_turns = get_dialogue_turns(dialogue, num_labeled_turns=num_labeled_turns, example_index=example_index, strict=False)
+        return cleaned_rules, cleaned_labels, cleaned_explanations, cleaned_discussions, dialogue, dialogue_turns, num_rules, num_labeled_turns
+
+def get_token_count(text):
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
+    tokens = tokenizer.encode(text)
+    return len(tokens)
 
 def print_stats(dataset_path, local=True, obj=False, torchtune=False):
     if obj:
@@ -289,11 +312,24 @@ def print_stats(dataset_path, local=True, obj=False, torchtune=False):
         dataset = datasets.load_dataset("json", data_files={"_": dataset_path}, split="_")
     else:
         dataset = datasets.load_dataset(dataset_path)
+    # Stats for rules
     min_rules = float("inf")
     max_rules = 0
+    total_rules = 0
+    
+    # Stats for turns
+    min_turns = float("inf")
+    max_turns = 0
+    total_turns = 0
+    
+    # Stats for tokens
+    min_tokens = float("inf")
+    max_tokens = 0
+    total_tokens = 0
+    
     num_pass = 0
     num_fail = 0
-    total_rules = 0
+    
     for i, example in enumerate(dataset):
         output_field = TORCHTUNE_OUTPUT_FIELD if torchtune else UNSLOTH_OUTPUT_FIELD
         label = extract_xml_answer(example[output_field], LABEL_OPENING, LABEL_CLOSING)
@@ -303,20 +339,54 @@ def print_stats(dataset_path, local=True, obj=False, torchtune=False):
             num_fail += 1
         else:
             raise ComplianceProjectError(f"Invalid label for example {i}: {example[output_field]}")
+            
+        # Rules stats
         if example[NUM_RULES_METADATA] < min_rules:
             min_rules = example[NUM_RULES_METADATA]
         if example[NUM_RULES_METADATA] > max_rules:
             max_rules = example[NUM_RULES_METADATA]
         total_rules += example[NUM_RULES_METADATA]
+        
+        # Turns stats
+        if "num_turns" in example:
+            if example["num_turns"] < min_turns:
+                min_turns = example["num_turns"]
+            if example["num_turns"] > max_turns:
+                max_turns = example["num_turns"]
+            total_turns += example["num_turns"]
+        
+        # Tokens stats
+        if "num_tokens" in example:
+            if example["num_tokens"] < min_tokens:
+                min_tokens = example["num_tokens"]
+            if example["num_tokens"] > max_tokens:
+                max_tokens = example["num_tokens"]
+            total_tokens += example["num_tokens"]
+            
     mean_rules = total_rules / len(dataset)
     pass_rate = num_pass / len(dataset)
+    
     print(f"""Number of examples: {len(dataset)}
 Number of PASS examples: {num_pass}
 Number of FAIL examples: {num_fail}
 Pass rate: {pass_rate:.1%}
 Min rules: {min_rules}
 Max rules: {max_rules}
-Mean rules: {mean_rules:.1f}
+Mean rules: {mean_rules:.1f}""")
+    
+    # Print turns stats if available
+    if total_turns > 0:
+        mean_turns = total_turns / len(dataset)
+        print(f"""Min turns: {min_turns}
+Max turns: {max_turns}
+Mean turns: {mean_turns:.1f}""")
+    
+    # Print tokens stats if available
+    if total_tokens > 0:
+        mean_tokens = total_tokens / len(dataset)
+        print(f"""Min tokens: {min_tokens}
+Max tokens: {max_tokens}
+Mean tokens: {mean_tokens:.1f}
 """)
 
 def clean_rule(rule):
@@ -335,7 +405,7 @@ def parse_string_list(string_list):
     native_list = ast.literal_eval(string_list)
     return native_list
 
-def get_dialogue_turns(dialogue, expected_turns, example_index=-1):
+def get_dialogue_turns(dialogue, num_labeled_turns, example_index=-1, strict=False):
     delimiters = ["'User':", """"User":"""]
     dialogue_turns = []
     for delimiter in delimiters:
@@ -345,9 +415,9 @@ def get_dialogue_turns(dialogue, expected_turns, example_index=-1):
             dialogue_turns = [f"{delimiter}{item}" for item in main_dialogue.split(delimiter) if item]
             dialogue_turns[0] = dialogue_preamble + dialogue_turns[0]
             break
-    if len(dialogue_turns) != expected_turns:
+    if strict and len(dialogue_turns) != num_labeled_turns:
         raise ComplianceProjectError(f"""
-            Example {example_index}: Number of dialogue turns ({len(dialogue_turns)}) does not match number of turns in labels ({expected_turns}).
+            Example {example_index}: Number of dialogue turns ({len(dialogue_turns)}) does not match number of turns in labels ({num_labeled_turns}).
             Delimiters: {delimiters}
             Dialogue: {json.dumps(dialogue_turns, indent=4)}
             """)
