@@ -23,8 +23,12 @@ NUM_TURNS_METADATA = "num_turns"
 NUM_TOKENS_METADATA = "num_tokens"
 METADATA = "metadata"
 
-RULE_START = 'Rules Agent must follow:'
-CONVERSATION_START = 'Conversation:'
+# RULES_START = 'Rules Agent must follow:'
+# TRANSCRIPT_START = 'Conversation:'
+RULES_START = "<rules>"
+RULES_END = "</rules>"
+TRANSCRIPT_START = "<transcript>"
+TRANSCRIPT_END = "</transcript>"
 
 SYSTEM_PROMPT = """
 You are a guardian model evaluating the compliance of a chatbot agent to various rules. 

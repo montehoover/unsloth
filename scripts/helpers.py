@@ -15,8 +15,10 @@ from constants import (
     EXPLANATION_CLOSING,
     EXPLANATION_OPENING,
     METADATA,
+    RULES_END,
     TORCHTUNE_INPUT_FIELD,
     TORCHTUNE_OUTPUT_FIELD,
+    TRANSCRIPT_END,
     UNSLOTH_INPUT_FIELD,
     UNSLOTH_OUTPUT_FIELD,
     LINE_CLOSING,
@@ -30,8 +32,8 @@ from constants import (
     RULES_CLOSING,
     LABEL_CLOSING,
     LABEL_OPENING,
-    RULE_START,
-    CONVERSATION_START,
+    RULES_START,
+    TRANSCRIPT_START,
 )
 import logging
 import numpy as np
@@ -157,11 +159,11 @@ def confirm_dataset_compatibility(dataset, use_multirule):
 def apply_llamaguard_template(system_content, user_content):
     assert "rule" in system_content and "conversation" in system_content, f"Expected a llamaguard system template but got {system_content}"
     
-    rule_idx = user_content.find(RULE_START)
-    conversation_idx = user_content.find(CONVERSATION_START)
+    rule_idx = user_content.find(RULES_START)
+    conversation_idx = user_content.find(TRANSCRIPT_START)
 
-    rule = user_content[rule_idx + len(RULE_START):conversation_idx].strip()
-    conversation = user_content[conversation_idx + len(CONVERSATION_START):].strip()
+    rule = user_content[rule_idx + len(RULES_START):conversation_idx].strip()
+    conversation = user_content[conversation_idx + len(TRANSCRIPT_START):].strip()
     conversation = conversation.replace('\'User\'', 'User').replace('\'Agent\'', 'Agent')
 
     return system_content.format(rule=rule, conversation=conversation)
@@ -196,7 +198,7 @@ def get_cot(discussions, explanations, nlp_processor, num_sentences=4):
 
 def get_multirule_input(rules, dialogue):
     enumerated_rules = '\n'.join(f"{i+1}. {rule}" for i, rule in enumerate(rules))
-    input = f"{RULE_START}\n{enumerated_rules}\n\n{CONVERSATION_START}\n{dialogue}"
+    input = f"{RULES_START}\n{enumerated_rules}\n{RULES_END}\n{TRANSCRIPT_START}\n{dialogue}\n{TRANSCRIPT_END}"
     return input
 
 def get_multirule_output(
@@ -275,7 +277,7 @@ def get_singlerule_examples(rules, labels, explanations, discussions, dialogue_t
             explanation = explanations[i][j]
             label = labels[i][j]
             dialogue_subset = "".join(dialogue_turns[:j+1])
-            example[input_field] = f"{RULE_START}\n{rule}\n\n{CONVERSATION_START}\n{dialogue_subset}"
+            example[input_field] = f"{RULES_START}\n{rule}\n\n{TRANSCRIPT_START}\n{dialogue_subset}"
             example[output_field] = f"{COT_OPENING}{discussion} {explanation}{COT_CLOSING}{LABEL_OPENING}{label}{LABEL_CLOSING}"
             examples.append(example)
     return examples
