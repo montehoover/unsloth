@@ -169,6 +169,7 @@ def get_grpo_trainer(args, model, tokenizer, run_name):
         resume_from_checkpoint = (args.resume_from_checkpoint and os.path.isdir(f"{args.output_dir}/{run_name}") and len(os.listdir(f"{args.output_dir}/{run_name}")) > 0), # Looks in output_dir for last checkpoint
         output_dir = f"{args.output_dir}/{run_name}",
         run_name = run_name,
+        log_completions = args.log_completions,
 
     )
     if args.correctness_only:
@@ -327,6 +328,7 @@ def parse_args():
     training_group.add_argument('--num_generations', type=int, default=12, help="Number of GRPO rollouts, default is 6. Decrease if out of memory.")
     training_group.add_argument('--max_prompt_length', type=int, default=4096, help="Maximum prompt length, default is 2048.")
     training_group.add_argument('--max_completion_length', type=int, default=512, help="Maximum completion length, default is 512.")
+    training_group.add_argument('--log_completions', action='store_true', help="Log completions to wandb.")
     training_group.add_argument('--max_grad_norm', type=float, default=0.1, help="Maximum gradient norm, default is 0.1.")
     # training_group.add_argument('--gpu_memory_utilization', type=float, default=0.7, help="GPU memory utilization. This dedicates memory for LoRA backprop and the rest is used for generations. 8B models with LoRA rank 64 work with 0.7 with 24GB VRAM.")
     training_group.add_argument('--gpu_memory_utilization', type=float, default=0.6, help="GPU memory utilization. This dedicates memory for LoRA backprop and the rest is used for generations. 8B models with LoRA rank 64 work with 0.7 with 24GB VRAM.")
