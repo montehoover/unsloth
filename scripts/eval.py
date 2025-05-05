@@ -2,12 +2,13 @@ import argparse
 import json
 import os
 import time
+import torch
 import datasets
-import uuid
-import matplotlib as mpl
 import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
 from constants import LLAMAGUARD_TEMPLATE, METADATA, MULTIRULE_SYSTEM_PROMPT_V2, MULTIRULE_SYSTEM_PROMPT_V2_NON_COT, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, SYSTEM_PROMPT_EXPERIMENTAL, SYSTEM_PROMPT_EXPERIMENTAL2, SYSTEM_PROMPT_NON_COT, UNSLOTH_INPUT_FIELD
@@ -20,14 +21,27 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+TEMP_PATH = f"temp_{time.time_ns()}"
+
+
+def get_hf_model(model_path, lora_path):
+    base_model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
+    lora_model = PeftModel.from_pretrained(base_model, lora_path)
+    hf_model = lora_model.merge_and_unload()
+    hf_model.save_pretrained(TEMP_PATH)
+    tokenizer = AutoTokenizer.from_pretrained(args.base_path)
+    tokenizer.save_pretrained(TEMP_PATH)
+    return TEMP_PATH
+
+
 def main(args):
     configure_logging(args.log_level)
 
     # Dataset
-    if args.subset is None:
+    if os.path.exists(args.dataset_path):
         dataset = datasets.load_dataset("json", data_files={"test": args.dataset_path})["test"]
     else:
-        dataset = datasets.load_dataset(args.dataset_path, args.subset, split="test")
+        dataset = datasets.load_dataset(args.dataset_path, args.subset, split=args.split)
     confirm_dataset_compatibility(dataset, args.multirule)
     n = args.num_examples if args.num_examples > 0 and args.num_examples < len(dataset) else len(dataset)
     # Shuffle to ensure we get a random subset. Don't shuffle if we're using the whole thing so we can keep track of indices for frequent misclassifications.
@@ -41,17 +55,22 @@ def main(args):
             model = BatchApiModelWrapper(args.model, args.temperature)
         else:
             model = ApiModelWrapper(args.model, args.temperature, args.api_delay, args.retries)
-    elif args.use_vllm:
-        model = VllmModelWrapper(args.model, args.temperature, args.top_k, args.max_new_tokens)
     else:
-        model = HfModelWrapper(args.model, args.temperature, args.top_k, args.max_new_tokens)
+        if args.lora_path:
+            model_path = get_hf_model(args.model, args.lora_path)
+        else:
+            model_path = args.model
+        if args.use_vllm:            
+            model = VllmModelWrapper(model_path, args.temperature, args.top_k, args.max_new_tokens)
+        else:
+            model = HfModelWrapper(model_path, args.temperature, args.top_k, args.max_new_tokens)
     
     # Generation
     if "Llama-Guard" in args.model:
         sys_prompt = LLAMAGUARD_TEMPLATE
         template_fn = apply_llamaguard_template
     elif args.multirule:
-        sys_prompt = MULTIRULE_SYSTEM_PROMPT_V2 if args.use_cot else MULTIRULE_SYSTEM_PROMPT_V2_NON_COT
+        sys_prompt = MULTIRULE_SYSTEM_PROMPT_V3 if args.use_cot else MULTIRULE_SYSTEM_PROMPT_V2_NON_COT
         template_fn = model.apply_chat_template_cot if args.use_cot else model.apply_chat_template
     else:
         sys_prompt = SYSTEM_PROMPT if args.use_cot else SYSTEM_PROMPT_NON_COT
@@ -74,6 +93,18 @@ def main(args):
         outputs = model.get_responses(messages)
         if "Llama-Guard" in args.model:
             outputs = [map_llamaguard_output(output) for output in outputs]
+
+        if args.go_twice:
+            first_outputs = []
+            second_output_indices = []
+            for i, output in enumerate(outputs):
+                if "<answer>" not in output:
+                    first_outputs.append(output)
+                    second_output_indices.append(i)
+            if second_outputs:
+                messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD], f"{output}<answer>") for x, output in zip(dataset.select(second_output_indices), first_outputs)]
+                second_outputs = model.get_responses(messages)
+                outputs = [output if i not in second_output_indices else second_outputs[i] for i, output in enumerate(outputs)]
 
         # Evaluation
         stats = get_stats(outputs, dataset, multirule=args.multirule)
@@ -99,9 +130,9 @@ def main(args):
     logger.notice(f"False Positives: {false_positives} ({false_positives / args.sample_size:0.2f} per sample)")
     logger.notice(f"False Negatives: {false_negatives} ({false_negatives / args.sample_size:0.2f} per sample)")
     logger.notice(f"Missing expected label: {missing_labels} ({missing_labels  / args.sample_size:0.2f} per sample)")
-    logger.notice(f"False Positive examples: {sorted(false_positive_examples)}")
-    logger.notice(f"False Negative examples: {sorted(false_negative_examples)}")
-    logger.notice(f"Missing expected label examples: {sorted(missing_label_examples)}")
+    logger.notice(f"False Positive examples: {(false_positive_examples)}")
+    logger.notice(f"False Negative examples: {(false_negative_examples)}")
+    logger.notice(f"Missing expected label examples: {(missing_label_examples)}")
     logger.notice(f"Dataset balance: PASS: {stats["percent_pass"]:.1%} FAIL: {1 - stats["percent_pass"]:.1%}")
 
     # Save outputs to disk
@@ -130,11 +161,15 @@ def main(args):
                 logger.notice(f"Failure Mode Category '{category}': {count}")
         save_results(analysis_dict, "log", output_path, model_name, np.mean(accuracies), accuracies.std(), outputs)
     
+    if args.lora_path:
+        # Clean up temp files
+        os.system(f"rm -rf {TEMP_PATH}")
+        logger.info(f"Temp files removed from {TEMP_PATH}")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert model to HuggingFace format")
-    parser.add_argument('--model', default="gpt-4o-mini", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="gpt-4o-mini", type=str, help="Model name to load")
     # parser.add_argument('--model', default="meta-llama/meta-Llama-3.1-8B-Instruct", type=str, help="Model name to load")
     # parser.add_argument("--model", default="meta-llama/Llama-Guard-3-8B", type=str, help="Model name to load")
     
@@ -142,25 +177,28 @@ def parse_args():
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", type=str, help="Model name to load")
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
     # Multi-rule models
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_base", type=str, help="Path to base model")
+    parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_sft/lora_multirule_v2", type=str, help="Model name to load")
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
-    # parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct", type=str, help="Model name to load")
-    # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_sft/lora_multirule", type=str, help="Model name to load")
-    
+    # parser.add_argument("--model", default="Qwen/Qwen2.5-3B-Instruct", type=str, help="Model name to load")
+    # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_grpo/lora_multirule_v2", type=str, help="Model name to load")
+    parser.add_argument("--lora_path",  default=None, type=str, help="Path to lora adapter")
+    # parser.add_argument("--lora_path",  default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/lora_7500/epoch_2", type=str, help="Path to lora adapter")
     # Single-rule datasets
     # parser.add_argument("--dataset_path", default="output/handcrafted/test.jsonl", type=str, help="Path to dataset")
     # Multi-rule datasets
-    parser.add_argument("--dataset_path", default="data/multirule/multi_rule_test_98_cot.jsonl", type=str, help="Path to dataset")
-    parser.add_argument("--subset", default=None, type=str, help="Subset of the dataset to use")
-    # parser.add_argument("--dataset_path", default="tomg-group-umd/compliance", type=str, help="Path to dataset")
-    # parser.add_argument("--subset", default="handcrafted", type=str, help="Subset of the dataset to use")
+    # parser.add_argument("--dataset_path", default="data/multirule/multi_rule_test_98_cot.jsonl", type=str, help="Path to dataset")
+    # parser.add_argument("--dataset_path", default="data/test.jsonl", type=str, help="Path to dataset")
+    parser.add_argument("--dataset_path", default="tomg-group-umd/compliance", type=str, help="Path to dataset")
+    parser.add_argument("--subset", default="compliance", type=str, help="Subset of the dataset to use")
+    parser.add_argument("--split", default="test", type=str, help="Split of the dataset to use")
     
     parser.add_argument("--num_examples", default=-1, type=int, help="Number of examples to evaluate")
     parser.add_argument("--log_level", default=None, type=str, help="Log level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "debug", "info", "warning", "error", "critical"])
     parser.add_argument("--use_vllm", default=True, action=argparse.BooleanOptionalAction, help="Use VLLM for generation")
     parser.add_argument("--max_model_len", default=8192, type=int, help="Maximum context length for vllm. Should be based on the space of your gpu, not the model capabilities. If this is too high for the gpu, it will tell you.")
     # Generation parameters taken from gpt-fast
-    parser.add_argument("--max_new_tokens", default=512, type=int, help="Maximum tokens to generate")
+    parser.add_argument("--max_new_tokens", default=2048, type=int, help="Maximum tokens to generate")
     parser.add_argument("--temperature", default=0.6, type=float, help="Generation temperature")
     parser.add_argument("--top_k", default=300, type=int, help="Top k tokens to consider")
     # API stuff
@@ -172,6 +210,7 @@ def parse_args():
     parser.add_argument("--use_cot", default=True, action=argparse.BooleanOptionalAction, help="Use COT for generation")
     parser.add_argument("--multirule", default=True, action=argparse.BooleanOptionalAction, help="Use multirule evaluation")
     parser.add_argument("--handcrafted_analysis", default=False, action=argparse.BooleanOptionalAction, help="do handcrafted analysis")
+    parser.add_argument("--go_twice", default=False, action=argparse.BooleanOptionalAction, help="Run the model twice to get a better accuracy")
     return parser.parse_args()
 
 if __name__ == "__main__":

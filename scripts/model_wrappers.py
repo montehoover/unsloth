@@ -24,28 +24,30 @@ class ComplianceProjectError(ValueError):
     pass
 
 class ModelWrapper:
-    def get_message_template(self, system_content=None, user_content=None):
+    def get_message_template(self, system_content=None, user_content=None, assistant_content=None):
+        assistant_content = assistant_content or LABEL_OPENING
         if system_content is None:
             return [{'role': 'user', 'content': user_content}]
         else:
             return [
                 {'role': 'system', 'content': system_content},
                 {'role': 'user', 'content': user_content},
-                {'role': 'assistant', 'content': LABEL_OPENING},
+                {'role': 'assistant', 'content': assistant_content},
             ]
 
-    def get_message_template_cot(self, system_content, user_content):
+    def get_message_template_cot(self, system_content, user_content, assistant_content=None):
+        assistant_content = assistant_content or COT_OPENING
         return [
             {'role': 'system', 'content': system_content},
             {'role': 'user', 'content': user_content},
-            {'role': 'assistant', 'content': COT_OPENING},
+            {'role': 'assistant', 'content': assistant_content},
         ]
 
-    def apply_chat_template(self, system_content, user_content):
-        return self.get_message_template(system_content, user_content)
+    def apply_chat_template(self, system_content=None, user_content=None, assistant_content=None):
+        return self.get_message_template(system_content, user_content, assistant_content)
     
-    def apply_chat_template_cot(self, system_content, user_content):
-        return self.get_message_template_cot(system_content, user_content)
+    def apply_chat_template_cot(self, system_content, user_content, assistant_content=None):
+        return self.get_message_template_cot(system_content, user_content, assistant_content)
 
 
 class LocalModelWrapper(ModelWrapper):
@@ -57,17 +59,18 @@ class LocalModelWrapper(ModelWrapper):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.tokenizer.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
 
-    def apply_chat_template(self, system_content, user_content):
-        message = super().apply_chat_template(system_content, user_content)
+    def apply_chat_template(self, system_content, user_content, assistant_content=None):
+        message = super().apply_chat_template(system_content, user_content, assistant_content)
         try:
-            prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
+            # prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
+            prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
         except Exception as e:
             print(message)
             raise
         return prompt
     
-    def apply_chat_template_cot(self, system_content, user_content):
-        message = super().apply_chat_template_cot(system_content, user_content)
+    def apply_chat_template_cot(self, system_content, user_content, assistant_content=None):
+        message = super().apply_chat_template_cot(system_content, user_content, assistant_content)
         prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
         return prompt
 
@@ -148,11 +151,17 @@ class ApiModelWrapper(ModelWrapper):
                     temperature=self.temperature,
                     messages=message
                 )
-                success = True
-                break
+                if response['choices'][0]['message']['content'] is None:
+                    logger.warning(f"Empty completion due to 'finish reason={response['choices'][0]['finish_reason']}'")
+                    continue
+                else:
+                    success = True
+                    break
             except (litellm.ContentPolicyViolationError, openai.APIError) as e:
                 if isinstance(e, openai.APIError) and not litellm._should_retry(e.status_code):
                     raise
+                else:
+                    logger.warning(f"API call error: {e}")
         if not success:
             raise ComplianceProjectError(f"Failed after {self.retries} retries.")
         return response['choices'][0]['message']['content']
@@ -213,8 +222,8 @@ class BatchApiModelWrapper(ModelWrapper):
         self.log_interval = log_interval
         self.max_batch_size = max_batch_size
         unique_id = str(uuid.uuid4())
-        self.input_filename = f"batch_input_{unique_id}.jsonl"
-        self.output_filename = f"batch_output_{unique_id}.jsonl"
+        self.input_filename = f"batch/batch_input_{unique_id}.jsonl"
+        self.output_filename = f"batch/batch_output_{unique_id}.jsonl"
 
     def create_jsonl_file(self, messages):
         requests = []
