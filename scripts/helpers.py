@@ -89,6 +89,7 @@ def get_stats(outputs, dataset, multirule=False):
         ground_truth_text = example[UNSLOTH_OUTPUT_FIELD]
         ground_truth_label = extract_xml_answer(ground_truth_text, LABEL_OPENING, LABEL_CLOSING)
         predicted_label = extract_xml_answer(output_text, LABEL_OPENING, LABEL_CLOSING)
+        print(f'Example:\n{example}\n\nOutput:{output_text}\n\nGround Truth:{ground_truth_text}\n\n')
         
         # Thing for GuardReasoner
         # if "PASS" in output_text:

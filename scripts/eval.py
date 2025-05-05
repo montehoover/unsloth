@@ -121,26 +121,26 @@ def main(args):
 
     if missing_label_examples:
         logger.notice(json.dumps(outputs[missing_label_examples[0]], indent=4))
-    logger.notice(f"Raw accuracy per sample: {accuracies}")
+    print(f"Raw accuracy per sample: {accuracies}")
     accuracies = np.array(accuracies)
     f1_scores = np.array(f1_scores)
-    logger.notice(f"Accuracy: {np.mean(accuracies):.2%} ")
-    logger.notice(f"F1 Score: {np.mean(f1_scores):.2%}")
-    logger.notice(f"Accuracy standard deviation = {accuracies.std():.2%}")
-    logger.notice(f"False Positives: {false_positives} ({false_positives / args.sample_size:0.2f} per sample)")
-    logger.notice(f"False Negatives: {false_negatives} ({false_negatives / args.sample_size:0.2f} per sample)")
-    logger.notice(f"Missing expected label: {missing_labels} ({missing_labels  / args.sample_size:0.2f} per sample)")
-    logger.notice(f"False Positive examples: {(false_positive_examples)}")
-    logger.notice(f"False Negative examples: {(false_negative_examples)}")
-    logger.notice(f"Missing expected label examples: {(missing_label_examples)}")
-    logger.notice(f"Dataset balance: PASS: {stats["percent_pass"]:.1%} FAIL: {1 - stats["percent_pass"]:.1%}")
+    print(f"Accuracy: {np.mean(accuracies):.2%} ")
+    print(f"F1 Score: {np.mean(f1_scores):.2%}")
+    print(f"Accuracy standard deviation = {accuracies.std():.2%}")
+    print(f"False Positives: {false_positives} ({false_positives / args.sample_size:0.2f} per sample)")
+    print(f"False Negatives: {false_negatives} ({false_negatives / args.sample_size:0.2f} per sample)")
+    print(f"Missing expected label: {missing_labels} ({missing_labels  / args.sample_size:0.2f} per sample)")
+    print(f"False Positive examples: {sorted(false_positive_examples)}")
+    print(f"False Negative examples: {sorted(false_negative_examples)}")
+    print(f"Missing expected label examples: {sorted(missing_label_examples)}")
+    print(f"Dataset balance: PASS: {stats["percent_pass"]:.1%} FAIL: {1 - stats["percent_pass"]:.1%}")
 
     # Save outputs to disk
     parts = args.model.split("/")
     model_name = f"{parts[parts.index("models") + 1]}_ours" if "models" in parts and parts.index("models") < len(parts) - 1 else args.model
     output_path = f"log/{model_name}/{time.time_ns()}"
     datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"{output_path}/outputs.jsonl")
-    logger.notice(f"Outputs saved to {output_path}/outputs.jsonl")
+    print(f"Outputs saved to {output_path}/outputs.jsonl")
 
     # Do analysis over length of dialogues and length of rules and stuff
     if args.handcrafted_analysis:
