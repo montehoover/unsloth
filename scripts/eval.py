@@ -1,6 +1,8 @@
 import argparse
 import json
 import os
+import csv
+import shutil
 import time
 import torch
 import datasets
@@ -9,9 +11,8 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
-from constants import LLAMAGUARD_TEMPLATE, METADATA, MULTIRULE_SYSTEM_PROMPT_V2, MULTIRULE_SYSTEM_PROMPT_V2_NON_COT, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, SYSTEM_PROMPT_EXPERIMENTAL, SYSTEM_PROMPT_EXPERIMENTAL2, SYSTEM_PROMPT_NON_COT, UNSLOTH_INPUT_FIELD
+from constants import LLAMAGUARD_TEMPLATE, METADATA, MULTIRULE_SYSTEM_PROMPT_V2, MULTIRULE_SYSTEM_PROMPT_V2_NON_COT, MULTIRULE_SYSTEM_PROMPT_V3, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, SYSTEM_PROMPT_EXPERIMENTAL, SYSTEM_PROMPT_EXPERIMENTAL2, SYSTEM_PROMPT_NON_COT, UNSLOTH_INPUT_FIELD
 from helpers import ComplianceProjectError, apply_llamaguard_template, configure_logging, confirm_model_compatibility, get_analysis, get_stats, confirm_dataset_compatibility, map_llamaguard_output, save_results
 
 from dotenv import load_dotenv, find_dotenv
@@ -24,12 +25,44 @@ logger = logging.getLogger(__name__)
 TEMP_PATH = f"temp_{time.time_ns()}"
 
 
+def compute_f1(total_pos: int,
+            false_positives: int,
+            false_negatives: int) -> float:
+    tp = total_pos - false_negatives
+    fp = false_positives
+    if tp + fp == 0:
+        precision = 0.0
+    else:
+        precision = tp / (tp + fp)
+    if total_pos == 0:
+        recall = 0.0
+    else:
+        recall = tp / total_pos
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+
+def add_to_csv(csv_filename: str,
+                    model_name: str,
+                    f1_score: float,
+                    mod_f1_score: float,
+                    missing_labels_score: float) -> None:
+    file_exists = os.path.isfile(csv_filename)
+
+    with open(csv_filename, mode='a', newline='') as f:
+        writer = csv.writer(f)
+        # Write header if file is new
+        if not file_exists:
+            writer.writerow(['model_name', 'f1_score', 'f1_score_mod', 'missing_labels_score'])
+        # Append the new row
+        writer.writerow([model_name, f1_score, mod_f1_score, missing_labels_score])
+
 def get_hf_model(model_path, lora_path):
     base_model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
     lora_model = PeftModel.from_pretrained(base_model, lora_path)
     hf_model = lora_model.merge_and_unload()
     hf_model.save_pretrained(TEMP_PATH)
-    tokenizer = AutoTokenizer.from_pretrained(args.base_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.save_pretrained(TEMP_PATH)
     return TEMP_PATH
 
@@ -142,6 +175,17 @@ def main(args):
     datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"{output_path}/outputs.jsonl")
     logger.notice(f"Outputs saved to {output_path}/outputs.jsonl")
 
+
+
+    # Append results to csv
+    # if os.path.exists("log/summary.csv"):
+    missing_rate = missing_labels / (args.sample_size * len(dataset))
+    total_pos = int((len(dataset) * args.sample_size - missing_labels) * (1-stats["percent_pass"]))
+    modifified_f1 = compute_f1(total_pos, false_positives, false_negatives)
+    if args.lora_path:
+        model_name = f"{model_name}_{args.lora_path.split('/')[-2]}"
+    add_to_csv("log/summary.csv", model_name, np.mean(f1_scores), modifified_f1, missing_rate)
+
     # Do analysis over length of dialogues and length of rules and stuff
     if args.handcrafted_analysis:
         wrong_predictions = false_positive_examples + false_negative_examples
@@ -163,7 +207,7 @@ def main(args):
     
     if args.lora_path:
         # Clean up temp files
-        os.system(f"rm -rf {TEMP_PATH}")
+        shutil.rmtree(TEMP_PATH, ignore_errors=True)
         logger.info(f"Temp files removed from {TEMP_PATH}")
 
 
@@ -178,9 +222,9 @@ def parse_args():
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
     # Multi-rule models
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_base", type=str, help="Path to base model")
-    parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_sft/lora_multirule_v2", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_sft/lora_multirule_v2", type=str, help="Model name to load")
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
-    # parser.add_argument("--model", default="Qwen/Qwen2.5-3B-Instruct", type=str, help="Model name to load")
+    parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct", type=str, help="Model name to load")
     # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_grpo/lora_multirule_v2", type=str, help="Model name to load")
     parser.add_argument("--lora_path",  default=None, type=str, help="Path to lora adapter")
     # parser.add_argument("--lora_path",  default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/lora_7500/epoch_2", type=str, help="Path to lora adapter")
