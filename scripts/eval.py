@@ -140,7 +140,7 @@ def main(args):
                 outputs = [output if i not in second_output_indices else second_outputs[i] for i, output in enumerate(outputs)]
 
         # Evaluation
-        stats = get_stats(outputs, dataset, multirule=args.multirule)
+        stats = get_stats(outputs, dataset, multirule=args.multirule, relaxed_parsing=args.relaxed_parsing)
 
         accuracies.append(stats["accuracy"])
         f1_scores.append(stats["f1_score"])
@@ -153,7 +153,9 @@ def main(args):
         missing_label_examples.extend(stats["nulls"])
 
     if missing_label_examples:
-        logger.notice(json.dumps(outputs[missing_label_examples[0]], indent=4))
+        for i in missing_label_examples:
+            logger.notice(outputs[i])
+        # logger.notice(json.dumps(outputs[missing_label_examples[0]], indent=4))
     print(f"Raw accuracy per sample: {accuracies}")
     accuracies = np.array(accuracies)
     f1_scores = np.array(f1_scores)
@@ -224,8 +226,8 @@ def parse_args():
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_base", type=str, help="Path to base model")
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_sft/lora_multirule_v2", type=str, help="Model name to load")
     # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
-    parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct", type=str, help="Model name to load")
-    # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-14B-Instruct/huggingface_grpo/lora_multirule_v2", type=str, help="Model name to load")
+    # parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct", type=str, help="Model name to load")
+    parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_grpo/lora_mix", type=str, help="Model name to load")
     parser.add_argument("--lora_path",  default=None, type=str, help="Path to lora adapter")
     # parser.add_argument("--lora_path",  default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/lora_7500/epoch_2", type=str, help="Path to lora adapter")
     # Single-rule datasets
@@ -242,7 +244,7 @@ def parse_args():
     parser.add_argument("--use_vllm", default=True, action=argparse.BooleanOptionalAction, help="Use VLLM for generation")
     parser.add_argument("--max_model_len", default=8192, type=int, help="Maximum context length for vllm. Should be based on the space of your gpu, not the model capabilities. If this is too high for the gpu, it will tell you.")
     # Generation parameters taken from gpt-fast
-    parser.add_argument("--max_new_tokens", default=2048, type=int, help="Maximum tokens to generate")
+    parser.add_argument("--max_new_tokens", default=8192, type=int, help="Maximum tokens to generate")
     parser.add_argument("--temperature", default=0.6, type=float, help="Generation temperature")
     parser.add_argument("--top_k", default=300, type=int, help="Top k tokens to consider")
     # API stuff
@@ -255,6 +257,7 @@ def parse_args():
     parser.add_argument("--multirule", default=True, action=argparse.BooleanOptionalAction, help="Use multirule evaluation")
     parser.add_argument("--handcrafted_analysis", default=False, action=argparse.BooleanOptionalAction, help="do handcrafted analysis")
     parser.add_argument("--go_twice", default=False, action=argparse.BooleanOptionalAction, help="Run the model twice to get a better accuracy")
+    parser.add_argument("--relaxed_parsing", default=False, action=argparse.BooleanOptionalAction, help="Use relaxed parsing for finding PASS/FAIL between the xml tags")
     return parser.parse_args()
 
 if __name__ == "__main__":

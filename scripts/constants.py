@@ -8,6 +8,8 @@ COT_OPENING = "<reasoning>"
 COT_CLOSING = "</reasoning>"
 LABEL_OPENING = "<answer>"
 LABEL_CLOSING = "</answer>"
+POS_LABEL = "FAIL" # We call this the "positive" label because it is the thing we want to detect. We want to find rule violations, and a false positive is declaring a violation that is not there.
+NEG_LABEL = "PASS"
 
 RULES_OPENING = "<rules_violated>"
 RULES_CLOSING = "</rules_violated>"

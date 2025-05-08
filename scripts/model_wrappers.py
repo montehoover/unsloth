@@ -81,18 +81,19 @@ class HfModelWrapper(LocalModelWrapper):
         super().__init__(model_name, temperature, top_k, max_new_tokens)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, device_map="auto", torch_dtype=torch.bfloat16
-        )
+        ).eval()
 
     def get_response(self, message):
         inputs = self.tokenizer(message, return_tensors="pt").to(self.model.device)
-        output_content = self.model.generate(
-            **inputs,
-            max_new_tokens=self.max_new_tokens,
-            num_return_sequences=1,
-            temperature=self.temperature,
-            top_k=self.top_k,
-            pad_token_id=self.tokenizer.pad_token_id
-        )
+        with torch.no_grad():
+            output_content = self.model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                num_return_sequences=1,
+                temperature=self.temperature,
+                top_k=self.top_k,
+                pad_token_id=self.tokenizer.pad_token_id
+            )
         output_text = self.tokenizer.decode(output_content[0], skip_special_tokens=True)
         return output_text
 

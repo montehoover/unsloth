@@ -50,7 +50,8 @@ def main(args):
     if args.lora_path:
         model_path = get_hf_model(args.model, args.lora_path)
     else:
-        model = HfModelWrapper(model_path, args.temperature, args.top_k, args.max_new_tokens)
+        model_path = args.model
+    model = HfModelWrapper(model_path, args.temperature, args.top_k, args.max_new_tokens)
     messages = [model.apply_chat_template(MULTIRULE_SYSTEM_PROMPT_V3, x[UNSLOTH_INPUT_FIELD], "<answer>") for x in dataset]
     outputs = model.get_responses(messages)
     for output in outputs:

@@ -15,6 +15,8 @@ from constants import (
     EXPLANATION_CLOSING,
     EXPLANATION_OPENING,
     METADATA,
+    NEG_LABEL,
+    POS_LABEL,
     RULES_END,
     TORCHTUNE_INPUT_FIELD,
     TORCHTUNE_OUTPUT_FIELD,
@@ -70,6 +72,14 @@ def extract_xml_answer(text, opening_tag, closing_tag):
     answer = answer.split(closing_tag.strip())[0]
     return answer.strip()
 
+def extract_answer_anywhere(text, pos_label, neg_label):
+    if pos_label in text:
+        return pos_label
+    elif neg_label in text:
+        return neg_label
+    else:
+        return "null"
+
 def filter_nulls(ground_truth_labels, predicted_labels):
     nulls = []
     for i, label in enumerate(predicted_labels):
@@ -79,7 +89,7 @@ def filter_nulls(ground_truth_labels, predicted_labels):
             predicted_labels[i] = "FAIL" if ground_truth_labels[i] == "PASS" else "PASS"
     return predicted_labels, nulls
 
-def get_stats(outputs, dataset, multirule=False):
+def get_stats(outputs, dataset, multirule=False, relaxed_parsing=False):
     ground_truth_labels = []
     predicted_labels = []
     false_negatives = []  
@@ -88,8 +98,11 @@ def get_stats(outputs, dataset, multirule=False):
     for i, (example, output_text) in enumerate(zip(dataset, outputs)):
         ground_truth_text = example[UNSLOTH_OUTPUT_FIELD]
         ground_truth_label = extract_xml_answer(ground_truth_text, LABEL_OPENING, LABEL_CLOSING)
-        predicted_label = extract_xml_answer(output_text, LABEL_OPENING, LABEL_CLOSING)
-        print(f'Example:\n{example}\n\nOutput:{output_text}\n\nGround Truth:{ground_truth_text}\n\n')
+        if relaxed_parsing:
+            predicted_label = extract_answer_anywhere(output_text, POS_LABEL, NEG_LABEL)
+        else:
+            predicted_label = extract_xml_answer(output_text, LABEL_OPENING, LABEL_CLOSING)
+        # print(f'Example:\n{example}\n\nOutput:{output_text}\n\nGround Truth:{ground_truth_text}\n\n')
         
         # Thing for GuardReasoner
         # if "PASS" in output_text:
