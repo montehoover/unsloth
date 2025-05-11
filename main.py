@@ -152,14 +152,19 @@ def extract_xml_rules(text: str) -> str:
     rules = rules.split(RULES_CLOSING.strip())[0]
     return rules.strip()
 
-def get_compliance_examples(dataset_path) -> Dataset:
-    data = load_dataset('json', data_files=dataset_path)['train']
+def get_compliance_examples(dataset_path, subset=None) -> Dataset:
+    if "json" in dataset_path:
+        data = load_dataset('json', data_files=dataset_path)['train']
+    else:
+        assert subset is not None, "Must provide subset if using a dataset pulled from huggingface"
+        data = load_dataset(dataset_path, subset, split='train')
+    data = data.remove_columns([col for col in data.column_names if col not in [INPUT_FIELD, OUTPUT_FIELD]])
     data = data.map(lambda x: { # type: ignore
         'prompt': [
             {'role': 'system', 'content': SYSTEM_PROMPT},
             {'role': 'user', 'content': x[INPUT_FIELD]}
         ],
-        OUTPUT_FIELD: f'{extract_xml_answer(x[OUTPUT_FIELD])};{extract_xml_rules(x[OUTPUT_FIELD])}'
+        OUTPUT_FIELD: extract_xml_answer(x[OUTPUT_FIELD])
     }) # type: ignore
     return data # type: ignore
 

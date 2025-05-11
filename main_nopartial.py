@@ -174,6 +174,15 @@ def get_grpo_trainer(args, model, tokenizer, run_name):
     )
     if args.correctness_only:
         reward_funcs = [correctness_reward_func]
+    # elif args.length_penalty:
+    #     reward_funcs = [
+    #         xmlcount_reward_func,
+    #         soft_format_reward_func,
+    #         strict_format_reward_func,
+    #         label_reward_func,
+    #         correctness_reward_func,
+    #         length_penalty,
+    #     ]
     else:
         reward_funcs = [
             xmlcount_reward_func,
@@ -201,12 +210,15 @@ def configure_logging(log_level):
     )
 
 def run(args):
-    run_name = f"{args.learning_rate:.1e}_{args.num_generations}_{args.gradient_accumulation_steps}_{args.lora_rank}_{args.lora_alpha}_{args.max_grad_norm}_{args.warmup_steps}"
-    if args.model_run_name:
-        model_run_name = args.model_run_name
+    if args.run_name:
+        run_name = args.run_name
     else:
-        model_run_name = args.model_name.split("/")[-1]
-    run_name = f"{model_run_name}_{run_name}"
+        run_name = f"{args.learning_rate:.1e}_{args.num_generations}_{args.gradient_accumulation_steps}_{args.lora_rank}_{args.lora_alpha}_{args.max_grad_norm}_{args.warmup_steps}"
+        if args.model_run_name:
+            model_run_name = args.model_run_name
+        else:
+            model_run_name = args.model_name.split("/")[-1]
+        run_name = f"{model_run_name}_{run_name}"
 
     logger.info(f"Loading model...")
     # Load model and tokenizer
@@ -293,6 +305,7 @@ def parse_args():
     model_group.add_argument('--model_name', type=str, default="/fs/cml-projects/guardian_models/models/Qwen2-1.5B-Instruct/huggingface_sft/7500", help="Model name to load")
     # model_group.add_argument('--model_run_name', type=str, default=None, help="Name of the model for the run information if you don't want to use the last portion of the model path.")
     model_group.add_argument('--model_run_name', type=str, default="Qwen2-1.5B_7500", help="Name of the model for the run information if you don't want to use the last portion of the model path.")
+    model_group.add_argument('--run_name', type=str, default=None, help="Name of the run for the model.")
     model_group.add_argument('--max_seq_length', type=int, default=4096, help="Maximum sequence length, default is 2048. We auto support RoPE Scaling internally!")
     model_group.add_argument('--dtype', type=str, default=None, help="Data type for model (None for auto detection)")
     model_group.add_argument('--load_in_4bit', action=argparse.BooleanOptionalAction, default=False, help="Use 4bit quantization to reduce memory usage")
@@ -361,6 +374,7 @@ def parse_args():
     push_group.add_argument('--push_gguf', action='store_true', help="Push the model as GGUF to Hugging Face hub after training")
     push_group.add_argument('--hub_path', type=str, default="hf/model", help="Path on Hugging Face hub to push the model")
     push_group.add_argument('--hub_token', type=str, help="Token for pushing the model to Hugging Face hub")
+
 
     return parser.parse_args()
 
