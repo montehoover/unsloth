@@ -12,7 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
-from constants import LLAMAGUARD_TEMPLATE, METADATA, MULTIRULE_SYSTEM_PROMPT_V2, MULTIRULE_SYSTEM_PROMPT_V2_NON_COT, MULTIRULE_SYSTEM_PROMPT_V3, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, SYSTEM_PROMPT_EXPERIMENTAL, SYSTEM_PROMPT_EXPERIMENTAL2, SYSTEM_PROMPT_NON_COT, UNSLOTH_INPUT_FIELD
+from constants import LLAMAGUARD_TEMPLATE, METADATA, MULTIRULE_SYSTEM_PROMPT_V2, MULTIRULE_SYSTEM_PROMPT_V2_NON_COT, MULTIRULE_SYSTEM_PROMPT_V3, MULTIRULE_SYSTEM_PROMPT_V4, NEMOGUARD_TEMPLATE, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, SYSTEM_PROMPT_EXPERIMENTAL, SYSTEM_PROMPT_EXPERIMENTAL2, SYSTEM_PROMPT_NON_COT, UNSLOTH_INPUT_FIELD
 from helpers import ComplianceProjectError, apply_llamaguard_template, configure_logging, confirm_model_compatibility, get_analysis, get_stats, confirm_dataset_compatibility, map_llamaguard_output, save_results
 
 from dotenv import load_dotenv, find_dotenv
@@ -42,20 +42,24 @@ def compute_f1(total_pos: int,
         return 0.0
     return 2 * precision * recall / (precision + recall)
 
-def add_to_csv(csv_filename: str,
-                    model_name: str,
-                    f1_score: float,
-                    mod_f1_score: float,
-                    missing_labels_score: float) -> None:
+def add_to_csv(
+    csv_filename="log/summary.csv",
+    model_name="Placeholder",
+    test_set="Placeholder",
+    f1_score=None,
+    f1_stdev=None,
+    mod_f1_score=None,
+    missing_labels_score=None,
+):
     file_exists = os.path.isfile(csv_filename)
 
     with open(csv_filename, mode='a', newline='') as f:
         writer = csv.writer(f)
         # Write header if file is new
         if not file_exists:
-            writer.writerow(['model_name', 'f1_score', 'f1_score_mod', 'missing_labels_score'])
+            writer.writerow(['model_name', 'test_set', 'f1_score', 'f1_stdev', 'missing_labels'])
         # Append the new row
-        writer.writerow([model_name, f1_score, mod_f1_score, missing_labels_score])
+        writer.writerow([model_name, test_set, f1_score, f1_stdev, missing_labels_score])
 
 def get_hf_model(model_path, lora_path):
     base_model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
@@ -93,7 +97,7 @@ def main(args):
             model_path = get_hf_model(args.model, args.lora_path)
         else:
             model_path = args.model
-        if args.use_vllm:            
+        if args.use_vllm and "nemoguard" not in model_path:
             model = VllmModelWrapper(model_path, args.temperature, args.top_k, args.max_new_tokens)
         else:
             model = HfModelWrapper(model_path, args.temperature, args.top_k, args.max_new_tokens)
@@ -102,17 +106,20 @@ def main(args):
     if "Llama-Guard" in args.model:
         sys_prompt = LLAMAGUARD_TEMPLATE
         template_fn = apply_llamaguard_template
+    elif "nemoguard" in args.model:
+        sys_prompt = NEMOGUARD_TEMPLATE
+        template_fn = apply_llamaguard_template
     elif args.multirule:
-        sys_prompt = MULTIRULE_SYSTEM_PROMPT_V3 if args.use_cot else MULTIRULE_SYSTEM_PROMPT_V2_NON_COT
+        sys_prompt = MULTIRULE_SYSTEM_PROMPT_V4
         template_fn = model.apply_chat_template_cot if args.use_cot else model.apply_chat_template
     else:
         sys_prompt = SYSTEM_PROMPT if args.use_cot else SYSTEM_PROMPT_NON_COT
         template_fn = model.apply_chat_template_cot if args.use_cot else model.apply_chat_template
 
-    messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD]) for x in dataset]
-
-    # A thing for WildGuard
-    # messages = [f"<s>[INST]{sys_prompt}\n{x[UNSLOTH_INPUT_FIELD]}[/INST]" for x in dataset]
+    if "wildguard" in args.model:
+        messages = [f"<s>[INST]{sys_prompt}\n{x[UNSLOTH_INPUT_FIELD]}[/INST]" for x in dataset]
+    else:
+        messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD]) for x in dataset]
 
     accuracies = []
     f1_scores = []
@@ -124,7 +131,7 @@ def main(args):
     missing_label_examples = []
     for _ in range(args.sample_size):
         outputs = model.get_responses(messages)
-        if "Llama-Guard" in args.model:
+        if "Llama-Guard" in args.model or "nemoguard" in args.model:
             outputs = [map_llamaguard_output(output) for output in outputs]
 
         if args.go_twice:
@@ -140,7 +147,11 @@ def main(args):
                 outputs = [output if i not in second_output_indices else second_outputs[i] for i, output in enumerate(outputs)]
 
         # Evaluation
-        stats = get_stats(outputs, dataset, multirule=args.multirule, relaxed_parsing=args.relaxed_parsing)
+        if "GuardReasoner" in args.model:
+            relaxed_parsing = True
+        else:
+            relaxed_parsing = args.relaxed_parsing
+        stats = get_stats(outputs, dataset, multirule=args.multirule, relaxed_parsing=relaxed_parsing)
 
         accuracies.append(stats["accuracy"])
         f1_scores.append(stats["f1_score"])
@@ -153,15 +164,16 @@ def main(args):
         missing_label_examples.extend(stats["nulls"])
 
     if missing_label_examples:
-        for i in missing_label_examples:
-            logger.notice(outputs[i])
-        # logger.notice(json.dumps(outputs[missing_label_examples[0]], indent=4))
+        # for i in missing_label_examples:
+        #     logger.notice(outputs[i])
+        logger.notice(json.dumps(outputs[missing_label_examples[0]], indent=4))
     print(f"Raw accuracy per sample: {accuracies}")
     accuracies = np.array(accuracies)
     f1_scores = np.array(f1_scores)
     print(f"Accuracy: {np.mean(accuracies):.2%} ")
     print(f"F1 Score: {np.mean(f1_scores):.2%}")
     print(f"Accuracy standard deviation = {accuracies.std():.2%}")
+    print(f"F1 Score standard deviation = {f1_scores.std():.2%}")
     print(f"False Positives: {false_positives} ({false_positives / args.sample_size:0.2f} per sample)")
     print(f"False Negatives: {false_negatives} ({false_negatives / args.sample_size:0.2f} per sample)")
     print(f"Missing expected label: {missing_labels} ({missing_labels  / args.sample_size:0.2f} per sample)")
@@ -173,10 +185,13 @@ def main(args):
     # Save outputs to disk
     parts = args.model.split("/")
     model_name = f"{parts[parts.index("models") + 1]}_ours" if "models" in parts and parts.index("models") < len(parts) - 1 else args.model
+    if "lora_multirule_v2" in parts:
+        model_name += "_lora"
+    if "lora_mix" in parts:
+        model_name += "_lora_32000_mix"
     output_path = f"log/{model_name}/{time.time_ns()}"
     datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"{output_path}/outputs.jsonl")
     print(f"Outputs saved to {output_path}/outputs.jsonl")
-
 
 
     # Append results to csv
@@ -186,7 +201,15 @@ def main(args):
     modifified_f1 = compute_f1(total_pos, false_positives, false_negatives)
     if args.lora_path:
         model_name = f"{model_name}_{args.lora_path.split('/')[-2]}"
-    add_to_csv("log/summary.csv", model_name, np.mean(f1_scores), modifified_f1, missing_rate)
+    add_to_csv(
+        csv_filename="log/summary.csv", 
+        model_name=model_name,
+        test_set=args.subset,
+        f1_score=np.mean(f1_scores),
+        f1_stdev=f1_scores.std(),
+        missing_labels_score=missing_rate,
+    ) 
+
 
     # Do analysis over length of dialogues and length of rules and stuff
     if args.handcrafted_analysis:

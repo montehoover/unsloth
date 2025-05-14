@@ -56,7 +56,10 @@ class LocalModelWrapper(ModelWrapper):
         self.temperature = temperature
         self.top_k = top_k
         self.max_new_tokens = max_new_tokens
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if "nemoguard" in model_name:
+            self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.tokenizer.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
 
     def apply_chat_template(self, system_content, user_content, assistant_content=None):
@@ -72,6 +75,14 @@ class LocalModelWrapper(ModelWrapper):
     def apply_chat_template_cot(self, system_content, user_content, assistant_content=None):
         message = super().apply_chat_template_cot(system_content, user_content, assistant_content)
         prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
+        return prompt
+    
+    def apply_chat_template_cot_qwen(self, system_content, user_content, assistant_content=None):
+        message = [
+                {'role': 'system', 'content': system_content},
+                {'role': 'user', 'content': user_content},
+            ]
+        prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True, enable_thinking=True)
         return prompt
 
 
