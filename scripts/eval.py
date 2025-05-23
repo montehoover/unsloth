@@ -159,9 +159,14 @@ def main(args):
         false_negatives += len(stats["false_negatives"])
         missing_labels += len(stats["nulls"])
 
-        false_positive_examples.extend(stats["false_positives"])
-        false_negative_examples.extend(stats["false_negatives"])
-        missing_label_examples.extend(stats["nulls"])
+        if args.collect_all:
+            false_positive_examples.extend(stats["false_positives"])
+            false_negative_examples.extend(stats["false_negatives"])
+            missing_label_examples.extend(stats["nulls"])
+        else: # collect last run only
+            false_positive_examples = stats["false_positives"]
+            false_negative_examples = stats["false_negatives"]
+            missing_label_examples = stats["nulls"]
 
     if missing_label_examples:
         # for i in missing_label_examples:
@@ -203,6 +208,7 @@ def main(args):
         split=args.split,
         num_examples=len(dataset),
         f1_score=np.mean(f1_scores),
+        f1_stdev=f1_scores.std(),
         missing_labels=missing_labels,
         sample_size=args.sample_size
     )
@@ -272,6 +278,7 @@ def parse_args():
     parser.add_argument("--handcrafted_analysis", default=False, action=argparse.BooleanOptionalAction, help="do handcrafted analysis")
     parser.add_argument("--go_twice", default=False, action=argparse.BooleanOptionalAction, help="Run the model twice to get a better accuracy")
     parser.add_argument("--relaxed_parsing", default=False, action=argparse.BooleanOptionalAction, help="Use relaxed parsing for finding PASS/FAIL between the xml tags")
+    parser.add_argument("--collect_all", default=False, action=argparse.BooleanOptionalAction, help="Collect all outputs from multiple runs")
     return parser.parse_args()
 
 if __name__ == "__main__":

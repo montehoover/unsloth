@@ -779,7 +779,7 @@ def prepare_dataset_for_verl(
     print(f"Dataset downloaded and saved to {train_path} and {val_path}")
     return train_path, val_path
 
-def save_consolidated_outputs(model_name, enriched_outputs, dataset_path, subset, split, num_examples, f1_score, missing_labels, sample_size):
+def save_consolidated_outputs(model_name, enriched_outputs, dataset_path, subset, split, num_examples, f1_score, f1_stdev, missing_labels, sample_size):
     """
     Save enriched outputs to a consolidated file for cross-model comparison.
     
@@ -792,6 +792,7 @@ def save_consolidated_outputs(model_name, enriched_outputs, dataset_path, subset
           "split": "...",
           "num_examples": int,
           "f1_score": float,
+          "f1_stdev": float,
           "missing_labels": int,
           "sample_size": int
         },
@@ -840,6 +841,7 @@ def save_consolidated_outputs(model_name, enriched_outputs, dataset_path, subset
         "split": split,
         "num_examples": num_examples,
         "f1_score": float(f1_score),
+        "f1_stdev": float(f1_stdev),
         "missing_labels": missing_labels,
         "sample_size": sample_size
     }
