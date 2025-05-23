@@ -451,33 +451,98 @@ def combine_datasets(non_cot_filepath, cot_filepath):
     print(f"Saved combined dataset to {new_path}")
     return new_path
 
+def get_token_bucket(num_tokens):
+    """Create reasonable buckets for num_tokens"""
+    if num_tokens <= 500:
+        return 500
+    elif num_tokens <= 1000:
+        return 1000
+    elif num_tokens <= 2000:
+        return 2000
+    elif num_tokens <= 4000:
+        return 4000
+    elif num_tokens <= 8000:
+        return 8000
+    elif num_tokens <= 16000:
+        return 16000
+    else:
+        return 32000
 
 def get_analysis(dataset, wrong_predictions):
     assert METADATA in dataset.column_names, f"Dataset {dataset} does not have {METADATA} field"
     counts = {}
+    field_totals = {}
+    field_wrong = {}
+    
     for i, example in enumerate(dataset):
-        metadata = example[METADATA]
-        if i in wrong_predictions:
-            counts["business_impact_categories"] = counts.get("business_impact_categories", set()) | {metadata["business_impact"]}
-            counts["failure_mode_categories"] = counts.get("failure_mode_categories", set()) | {metadata["failure_mode"]}
-            counts[metadata["business_impact"]] = counts.get(metadata["business_impact"], 0) + 1
-            counts[metadata["failure_mode"]] = counts.get(metadata["failure_mode"], 0) + 1
-            if metadata["extra_failure_modes"] != "":
-                counts["failure_mode_categories"] = counts.get("failure_mode_categories", set()) | {metadata["extra_failure_modes"]}
-                counts[metadata["extra_failure_modes"]] = counts.get(metadata["extra_failure_modes"], 0) + 1
+        metadata_str = example[METADATA]
+        
+        # Parse metadata string back to dictionary
+        if isinstance(metadata_str, str):
+            try:
+                # Try JSON first
+                metadata = json.loads(metadata_str)
+            except json.JSONDecodeError:
+                try:
+                    # Try literal_eval as fallback
+                    metadata = ast.literal_eval(metadata_str)
+                except (ValueError, SyntaxError):
+                    # If both fail, skip this example
+                    continue
+        else:
+            # Already a dictionary
+            metadata = metadata_str
+
+        
+        # Collect counts for incorrect predictions so we can calculate accuracy below
+        is_wrong = i in wrong_predictions
+        if is_wrong:
             if metadata["num_counts"] != -1:
                 counts["num_counts"] = counts.get("num_counts", []) + [metadata["num_counts"]]
             if metadata["num_hops"] != -1:
-                counts["num_hops"] = counts.get("num_counts", []) + [metadata["num_hops"]]
+                counts["num_hops"] = counts.get("num_hops", []) + [metadata["num_hops"]]
             if metadata["num_turns"] != -1:
-                counts["num_turns"] = counts.get("num_counts", []) + [metadata["num_turns"]]
+                counts["num_turns"] = counts.get("num_turns", []) + [metadata["num_turns"]]
             if metadata["num_rules"] != -1:
-                counts["num_rules"] = counts.get("num_counts", []) + [metadata["num_rules"]]
+                counts["num_rules"] = counts.get("num_rules", []) + [metadata["num_rules"]]
             if metadata["rule_len"] != -1:
-                counts["rule_len"] = counts.get("num_counts", []) + [metadata["rule_len"]]
+                counts["rule_len"] = counts.get("rule_len", []) + [metadata["rule_len"]]
+        
+        # Collect counts for all predictions so we can calculate accuracy below
+        # We skip examples where the metadata is -1 or ""
+        for field in ["num_turns", "num_hops", "num_counts", "num_rules", "failure_mode"]:
+            value = metadata.get(field)
+            if value is not None and value != -1 and value != "":
+                field_totals.setdefault(field, {}).setdefault(value, 0)
+                field_totals[field][value] += 1
+                if is_wrong:
+                    field_wrong.setdefault(field, {}).setdefault(value, 0)
+                    field_wrong[field][value] += 1
+        
+        # Handle num_tokens with bucketing
+        num_tokens = metadata.get("num_tokens")
+        if num_tokens is not None and num_tokens != -1:
+            bucket = get_token_bucket(num_tokens)
+            field_totals.setdefault("num_tokens", {}).setdefault(bucket, 0)
+            field_totals["num_tokens"][bucket] += 1
+            if is_wrong:
+                field_wrong.setdefault("num_tokens", {}).setdefault(bucket, 0)
+                field_wrong["num_tokens"][bucket] += 1
+    
+    # Calculate accuracy percentages
+    for field in field_totals:
+        accuracy_dict = {}
+        for value, total in field_totals[field].items():
+            wrong = field_wrong.get(field, {}).get(value, 0)
+            accuracy = (total - wrong) / total if total > 0 else 0
+            accuracy_dict[value] = accuracy
+        counts[f"{field}_accuracy"] = accuracy_dict
+    
+    # Original median calculations
     for key in ["num_counts", "num_hops", "num_turns", "num_rules", "rule_len"]:
         if key in counts and isinstance(counts[key], list) and counts[key]:
             counts[f"{key}_median"] = np.median(counts[key])
+    
     return counts
 
 class JsonSetEncoder(json.JSONEncoder):
@@ -487,9 +552,55 @@ class JsonSetEncoder(json.JSONEncoder):
             return list(obj)
         return super().default(obj)
 
-def save_results(analysis_dict, output_root, output_path, model_name, total_accuracy, stdev, outputs):    
+def create_enriched_outputs(dataset, outputs, false_positive_examples, false_negative_examples, missing_label_examples):
+    """
+    Create enriched output data with base_id, output, is_correct, and missing_label fields.
+    
+    Args:
+        dataset: Original dataset containing base_id field
+        outputs: Model outputs
+        false_positive_examples: List of indices that are false positives
+        false_negative_examples: List of indices that are false negatives
+        missing_label_examples: List of indices that have missing labels (nulls)
+    
+    Returns:
+        List of dictionaries with base_id, output, is_correct, and missing_label fields
+    """
+    enriched_outputs = []
+    for i, output in enumerate(outputs):
+        base_id = dataset[i]["base_id"]
+        
+        # Determine is_correct and missing_label based on evaluation results
+        if i in missing_label_examples:
+            is_correct = False
+            missing_label = True
+        elif i in false_positive_examples or i in false_negative_examples:
+            is_correct = False
+            missing_label = False
+        else:
+            is_correct = True
+            missing_label = False
+            
+        enriched_outputs.append({
+            "base_id": base_id,
+            "output": output,
+            "is_correct": is_correct,
+            "missing_label": missing_label
+        })
+    
+    return enriched_outputs
+
+def save_results(analysis_dict, output_root, output_path, model_name, total_accuracy, stdev, outputs, dataset=None, false_positive_examples=None, false_negative_examples=None, missing_label_examples=None):    
     # --- JSONs for generation outputs and analysis_dict ---
-    datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"{output_path}/outputs.jsonl")
+    if (dataset is not None and false_positive_examples is not None and 
+        false_negative_examples is not None and missing_label_examples is not None):
+        # Use enriched format when evaluation results are available
+        enriched_outputs = create_enriched_outputs(dataset, outputs, false_positive_examples, false_negative_examples, missing_label_examples)
+        datasets.Dataset.from_list(enriched_outputs).to_json(f"{output_path}/outputs.jsonl")
+    else:
+        # Fallback to original format for backward compatibility
+        datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"{output_path}/outputs.jsonl")
+    
     with open(f"{output_path}/analysis.json", "w") as f:
         json.dump(analysis_dict, f, indent=4, cls=JsonSetEncoder)
 
@@ -667,3 +778,91 @@ def prepare_dataset_for_verl(
     val_set.to_parquet(val_path)
     print(f"Dataset downloaded and saved to {train_path} and {val_path}")
     return train_path, val_path
+
+def save_consolidated_outputs(model_name, enriched_outputs, dataset_path, subset, split, num_examples, f1_score, missing_labels, sample_size):
+    """
+    Save enriched outputs to a consolidated file for cross-model comparison.
+    
+    Structure of consolidated_outputs.json:
+    {
+      "model_name_1": {
+        "metadata": {
+          "dataset_path": "...",
+          "subset": "...",
+          "split": "...",
+          "num_examples": int,
+          "f1_score": float,
+          "missing_labels": int,
+          "sample_size": int
+        },
+        "outputs": {
+          "base_id_1": {
+            "output": "...",
+            "is_correct": bool,
+            "missing_label": bool
+          },
+          "base_id_2": {
+            "output": "...",
+            "is_correct": bool,
+            "missing_label": bool
+          },
+          ...
+        }
+      },
+      "model_name_2": {...},
+      ...
+    }
+    
+    Args:
+        model_name (str): Name of the model being evaluated
+        enriched_outputs (list): List of enriched output dictionaries with base_id, output, is_correct, and missing_label
+        dataset_path (str): Path to the dataset used
+        subset (str): Dataset subset used
+        split (str): Dataset split used
+        num_examples (int): Number of examples evaluated
+        f1_score (float): F1 score achieved
+        missing_labels (int): Number of missing labels
+        sample_size (int): Sample size used for evaluation
+    """
+    consolidated_file_path = "log/consolidated_outputs.json"
+
+    # Load existing consolidated data
+    if os.path.exists(consolidated_file_path):
+        with open(consolidated_file_path, 'r') as f:
+            consolidated_data = json.load(f)
+    else:
+        consolidated_data = {}
+
+    # Create metadata for this run
+    metadata = {
+        "dataset_path": dataset_path,
+        "subset": subset,
+        "split": split,
+        "num_examples": num_examples,
+        "f1_score": float(f1_score),
+        "missing_labels": missing_labels,
+        "sample_size": sample_size
+    }
+
+    # Convert enriched_outputs list to dictionary keyed by base_id
+    outputs_dict = {}
+    for item in enriched_outputs:
+        base_id = item["base_id"]
+        outputs_dict[base_id] = {
+            "output": item["output"],
+            "is_correct": item["is_correct"],
+            "missing_label": item["missing_label"]
+        }
+
+    # Update with current model's data (overwrite if exists)
+    consolidated_data[model_name] = {
+        "metadata": metadata,
+        "outputs": outputs_dict
+    }
+
+    # Ensure log directory exists and save consolidated file
+    os.makedirs(os.path.dirname(consolidated_file_path), exist_ok=True)
+    with open(consolidated_file_path, 'w') as f:
+        json.dump(consolidated_data, f, indent=2)
+
+    print(f"Consolidated outputs updated in {consolidated_file_path} for model: {model_name}")

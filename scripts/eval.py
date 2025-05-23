@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
 from constants import LLAMAGUARD_TEMPLATE, METADATA, MULTIRULE_SYSTEM_PROMPT_V2, MULTIRULE_SYSTEM_PROMPT_V2_NON_COT, MULTIRULE_SYSTEM_PROMPT_V3, MULTIRULE_SYSTEM_PROMPT_V4, NEMOGUARD_TEMPLATE, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, SYSTEM_PROMPT_EXPERIMENTAL, SYSTEM_PROMPT_EXPERIMENTAL2, SYSTEM_PROMPT_NON_COT, UNSLOTH_INPUT_FIELD
-from helpers import ComplianceProjectError, apply_llamaguard_template, configure_logging, confirm_model_compatibility, get_analysis, get_stats, confirm_dataset_compatibility, map_llamaguard_output, save_results
+from helpers import ComplianceProjectError, apply_llamaguard_template, configure_logging, confirm_model_compatibility, get_analysis, get_stats, confirm_dataset_compatibility, map_llamaguard_output, save_results, create_enriched_outputs, save_consolidated_outputs
 
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
@@ -190,9 +190,22 @@ def main(args):
     if "lora_mix" in parts:
         model_name += "_lora_32000_mix"
     output_path = f"log/{model_name}/{time.time_ns()}"
-    datasets.Dataset.from_list([{"_": _} for _ in outputs]).to_json(f"{output_path}/outputs.jsonl")
+    enriched_outputs = create_enriched_outputs(dataset, outputs, false_positive_examples, false_negative_examples, missing_label_examples)
+    datasets.Dataset.from_list(enriched_outputs).to_json(f"{output_path}/outputs.jsonl")
     print(f"Outputs saved to {output_path}/outputs.jsonl")
 
+    # Append to outputs from previous runs
+    save_consolidated_outputs(
+        model_name=model_name,
+        enriched_outputs=enriched_outputs,
+        dataset_path=args.dataset_path,
+        subset=args.subset,
+        split=args.split,
+        num_examples=len(dataset),
+        f1_score=np.mean(f1_scores),
+        missing_labels=missing_labels,
+        sample_size=args.sample_size
+    )
 
     # Append results to csv
     # if os.path.exists("log/summary.csv"):
@@ -215,20 +228,10 @@ def main(args):
     if args.handcrafted_analysis:
         wrong_predictions = false_positive_examples + false_negative_examples
         analysis_dict = get_analysis(dataset, wrong_predictions)
-        # Log median values
-        medians = {k: v for k, v in analysis_dict.items() if k.endswith('_median')}
-        for key, value in medians.items():
-            logger.notice(f"Median {key}: {value}")
-        # Log counts for business_impact and failure_mode categories
-        if "business_impact_categories" in analysis_dict:
-            for category in analysis_dict["business_impact_categories"]:
-                count = analysis_dict.get(category, 0)
-                logger.notice(f"Business Impact Category '{category}': {count}")
-        if "failure_mode_categories" in analysis_dict:
-            for category in analysis_dict["failure_mode_categories"]:
-                count = analysis_dict.get(category, 0)
-                logger.notice(f"Failure Mode Category '{category}': {count}")
-        save_results(analysis_dict, "log", output_path, model_name, np.mean(accuracies), accuracies.std(), outputs)
+        save_results(analysis_dict, "log", output_path, model_name, np.mean(accuracies), accuracies.std(), outputs, dataset, false_positive_examples, false_negative_examples, missing_label_examples)
+        with open(f"{output_path}/analysis.json", "w") as f:
+            json.dump(analysis_dict, f, indent=4)
+        print(f"Analysis saved to {output_path}/analysis.json")
     
     if args.lora_path:
         # Clean up temp files
@@ -238,29 +241,17 @@ def main(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert model to HuggingFace format")
-    # parser.add_argument('--model', default="gpt-4o-mini", type=str, help="Model name to load")
-    # parser.add_argument('--model', default="meta-llama/meta-Llama-3.1-8B-Instruct", type=str, help="Model name to load")
-    # parser.add_argument("--model", default="meta-llama/Llama-Guard-3-8B", type=str, help="Model name to load")
-    
-    # Single-rule models
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_sft/7500", type=str, help="Model name to load")
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
-    # Multi-rule models
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_base", type=str, help="Path to base model")
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_sft/lora_multirule_v2", type=str, help="Model name to load")
-    # parser.add_argument('--model', default="/fs/cml-projects/guardian_models/models/Meta-Llama-3.1-8B-Instruct/huggingface_grpo/7500", type=str, help="Model name to load")
+    parser.add_argument('--model', default="gpt-4o-mini", type=str, help="Model name to load")
     # parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct", type=str, help="Model name to load")
-    parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_grpo/lora_mix", type=str, help="Model name to load")
+    # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_grpo/lora_mix", type=str, help="Model name to load")
     parser.add_argument("--lora_path",  default=None, type=str, help="Path to lora adapter")
     # parser.add_argument("--lora_path",  default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/lora_7500/epoch_2", type=str, help="Path to lora adapter")
     # Single-rule datasets
-    # parser.add_argument("--dataset_path", default="output/handcrafted/test.jsonl", type=str, help="Path to dataset")
+    # parser.add_argument("--dataset_path", default="/Users/monte/code/system-prompt-compliance/output/formatted/compliance/test_handcrafted_v2.jsonl", type=str, help="Path to dataset")
     # Multi-rule datasets
-    # parser.add_argument("--dataset_path", default="data/multirule/multi_rule_test_98_cot.jsonl", type=str, help="Path to dataset")
-    # parser.add_argument("--dataset_path", default="data/test.jsonl", type=str, help="Path to dataset")
     parser.add_argument("--dataset_path", default="tomg-group-umd/compliance", type=str, help="Path to dataset")
     parser.add_argument("--subset", default="compliance", type=str, help="Subset of the dataset to use")
-    parser.add_argument("--split", default="test", type=str, help="Split of the dataset to use")
+    parser.add_argument("--split", default="test_handcrafted", type=str, help="Split of the dataset to use")
     
     parser.add_argument("--num_examples", default=-1, type=int, help="Number of examples to evaluate")
     parser.add_argument("--log_level", default=None, type=str, help="Log level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "debug", "info", "warning", "error", "critical"])
