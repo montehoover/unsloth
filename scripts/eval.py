@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
 from constants import LLAMAGUARD_TEMPLATE, METADATA, MULTIRULE_SYSTEM_PROMPT_V2, MULTIRULE_SYSTEM_PROMPT_V2_NON_COT, MULTIRULE_SYSTEM_PROMPT_V3, MULTIRULE_SYSTEM_PROMPT_V4, NEMOGUARD_TEMPLATE, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, SYSTEM_PROMPT_EXPERIMENTAL, SYSTEM_PROMPT_EXPERIMENTAL2, SYSTEM_PROMPT_NON_COT, UNSLOTH_INPUT_FIELD
-from helpers import ComplianceProjectError, apply_llamaguard_template, configure_logging, confirm_model_compatibility, get_analysis, get_stats, confirm_dataset_compatibility, map_llamaguard_output, save_results, create_enriched_outputs, save_consolidated_outputs
+from helpers import ComplianceProjectError, apply_llamaguard_template, configure_logging, confirm_model_compatibility, get_analysis, get_stats, confirm_dataset_compatibility, map_llamaguard_output, save_results, create_enriched_outputs, save_consolidated_outputs, save_consolidated_analysis
 
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
@@ -233,8 +233,22 @@ def main(args):
     # Do analysis over length of dialogues and length of rules and stuff
     if args.handcrafted_analysis:
         wrong_predictions = false_positive_examples + false_negative_examples
-        analysis_dict = get_analysis(dataset, wrong_predictions)
-        save_results(analysis_dict, "log", output_path, model_name, np.mean(accuracies), accuracies.std(), outputs, dataset, false_positive_examples, false_negative_examples, missing_label_examples)
+        analysis_dict = get_analysis(dataset, wrong_predictions, strict=args.strict_metadata)
+        
+        # Save consolidated analysis for cross-model comparison
+        save_consolidated_analysis(
+            model_name=model_name,
+            analysis_dict=analysis_dict,
+            dataset_path=args.dataset_path,
+            subset=args.subset,
+            split=args.split,
+            num_examples=len(dataset),
+            f1_score=np.mean(f1_scores),
+            missing_labels=missing_labels,
+            sample_size=args.sample_size
+        )
+        
+        # save_results(analysis_dict, "log", output_path, model_name, np.mean(accuracies), accuracies.std(), outputs, dataset, false_positive_examples, false_negative_examples, missing_label_examples)
         with open(f"{output_path}/analysis.json", "w") as f:
             json.dump(analysis_dict, f, indent=4)
         print(f"Analysis saved to {output_path}/analysis.json")
@@ -252,10 +266,9 @@ def parse_args():
     # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_grpo/lora_mix", type=str, help="Model name to load")
     parser.add_argument("--lora_path",  default=None, type=str, help="Path to lora adapter")
     # parser.add_argument("--lora_path",  default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/lora_7500/epoch_2", type=str, help="Path to lora adapter")
-    # Single-rule datasets
-    # parser.add_argument("--dataset_path", default="/Users/monte/code/system-prompt-compliance/output/formatted/compliance/test_handcrafted_v2.jsonl", type=str, help="Path to dataset")
-    # Multi-rule datasets
-    parser.add_argument("--dataset_path", default="tomg-group-umd/compliance", type=str, help="Path to dataset")
+    
+    parser.add_argument("--dataset_path", default="/Users/monte/code/system-prompt-compliance/output/formatted/compliance/test_handcrafted_v2.jsonl", type=str, help="Path to dataset")
+    # parser.add_argument("--dataset_path", default="tomg-group-umd/compliance", type=str, help="Path to dataset")
     parser.add_argument("--subset", default="compliance", type=str, help="Subset of the dataset to use")
     parser.add_argument("--split", default="test_handcrafted", type=str, help="Split of the dataset to use")
     
@@ -275,9 +288,10 @@ def parse_args():
     parser.add_argument("--sample_size", default=1, type=int, help="Number of samples used to calculate statistics.")
     parser.add_argument("--use_cot", default=True, action=argparse.BooleanOptionalAction, help="Use COT for generation")
     parser.add_argument("--multirule", default=True, action=argparse.BooleanOptionalAction, help="Use multirule evaluation")
-    parser.add_argument("--handcrafted_analysis", default=False, action=argparse.BooleanOptionalAction, help="do handcrafted analysis")
+    parser.add_argument("--handcrafted_analysis", default=True, action=argparse.BooleanOptionalAction, help="do handcrafted analysis")
     parser.add_argument("--go_twice", default=False, action=argparse.BooleanOptionalAction, help="Run the model twice to get a better accuracy")
     parser.add_argument("--relaxed_parsing", default=False, action=argparse.BooleanOptionalAction, help="Use relaxed parsing for finding PASS/FAIL between the xml tags")
+    parser.add_argument("--strict_metadata", default=True, action=argparse.BooleanOptionalAction, help="Fail fast with detailed error if metadata is missing instead of skipping examples")
     parser.add_argument("--collect_all", default=False, action=argparse.BooleanOptionalAction, help="Collect all outputs from multiple runs")
     return parser.parse_args()
 

@@ -40,6 +40,7 @@ from constants import (
 import logging
 import numpy as np
 from transformers import AutoTokenizer
+import yaml
 logger = logging.getLogger(__name__)
 
 
@@ -468,31 +469,66 @@ def get_token_bucket(num_tokens):
     else:
         return 32000
 
-def get_analysis(dataset, wrong_predictions):
+def get_analysis(dataset, wrong_predictions, strict=False):
     assert METADATA in dataset.column_names, f"Dataset {dataset} does not have {METADATA} field"
     counts = {}
     field_totals = {}
     field_wrong = {}
     
+    # Debug counters
+    skipped_none = 0
+    skipped_empty = 0 
+    skipped_unparseable = 0
+    skipped_invalid_type = 0
+    processed = 0
+    
     for i, example in enumerate(dataset):
         metadata_str = example[METADATA]
         
+        # Skip if metadata is None
+        if metadata_str is None:
+            skipped_none += 1
+            if strict:
+                raise ComplianceProjectError(f"Example {i} has no metadata (None). Example content: {json.dumps(example, indent=2)}")
+            continue
+        
         # Parse metadata string back to dictionary
         if isinstance(metadata_str, str):
+            # Check for empty string
+            if metadata_str.strip() == "":
+                skipped_empty += 1
+                if strict:
+                    raise ComplianceProjectError(f"Example {i} has empty metadata string. Example content: {json.dumps(example, indent=2)}")
+                continue
+                
             try:
-                # Try JSON first
-                metadata = json.loads(metadata_str)
-            except json.JSONDecodeError:
+                # Try YAML first
+                metadata = yaml.safe_load(metadata_str)
+            except yaml.YAMLError as yaml_error:
                 try:
-                    # Try literal_eval as fallback
-                    metadata = ast.literal_eval(metadata_str)
-                except (ValueError, SyntaxError):
-                    # If both fail, skip this example
-                    continue
+                    # Try JSON as fallback
+                    metadata = json.loads(metadata_str)
+                except json.JSONDecodeError as json_error:
+                    try:
+                        # Try literal_eval as final fallback
+                        metadata = ast.literal_eval(metadata_str)
+                    except (ValueError, SyntaxError) as literal_error:
+                        # If all fail, check strict mode
+                        skipped_unparseable += 1
+                        if strict:
+                            raise ComplianceProjectError(f"Example {i} has unparseable metadata. Metadata value: {repr(metadata_str)}. YAML error: {yaml_error}. JSON error: {json_error}. Literal eval error: {literal_error}. Example content: {json.dumps(example, indent=2)}")
+                        continue
         else:
             # Already a dictionary
             metadata = metadata_str
-
+            # But check if it's actually a valid dict-like object
+            if not hasattr(metadata, 'get'):
+                skipped_invalid_type += 1
+                if strict:
+                    raise ComplianceProjectError(f"Example {i} has metadata that is not None, string, or dict-like object. Type: {type(metadata)}, Value: {repr(metadata)}. Example content: {json.dumps(example, indent=2)}")
+                continue
+        
+        processed += 1
         
         # Collect counts for incorrect predictions so we can calculate accuracy below
         is_wrong = i in wrong_predictions
@@ -510,7 +546,7 @@ def get_analysis(dataset, wrong_predictions):
         
         # Collect counts for all predictions so we can calculate accuracy below
         # We skip examples where the metadata is -1 or ""
-        for field in ["num_turns", "num_hops", "num_counts", "num_rules", "failure_mode"]:
+        for field in ["num_turns", "num_hops", "num_counts", "num_rules", "failure_mode", "business_impact"]:
             value = metadata.get(field)
             if value is not None and value != -1 and value != "":
                 field_totals.setdefault(field, {}).setdefault(value, 0)
@@ -542,6 +578,18 @@ def get_analysis(dataset, wrong_predictions):
     for key in ["num_counts", "num_hops", "num_turns", "num_rules", "rule_len"]:
         if key in counts and isinstance(counts[key], list) and counts[key]:
             counts[f"{key}_median"] = np.median(counts[key])
+    
+    # Log debug information
+    total_examples = len(dataset)
+    logger.info(f"Metadata processing summary: {processed}/{total_examples} examples processed successfully")
+    if skipped_none > 0:
+        logger.warning(f"Skipped {skipped_none} examples with None metadata")
+    if skipped_empty > 0:
+        logger.warning(f"Skipped {skipped_empty} examples with empty metadata strings")  
+    if skipped_unparseable > 0:
+        logger.warning(f"Skipped {skipped_unparseable} examples with unparseable metadata")
+    if skipped_invalid_type > 0:
+        logger.warning(f"Skipped {skipped_invalid_type} examples with invalid metadata types")
     
     return counts
 
@@ -868,3 +916,75 @@ def save_consolidated_outputs(model_name, enriched_outputs, dataset_path, subset
         json.dump(consolidated_data, f, indent=2)
 
     print(f"Consolidated outputs updated in {consolidated_file_path} for model: {model_name}")
+
+def save_consolidated_analysis(model_name, analysis_dict, dataset_path, subset, split, num_examples, f1_score, missing_labels, sample_size):
+    """
+    Save analysis dictionary to a consolidated file for cross-model comparison.
+    
+    Structure of consolidated_analysis.json:
+    {
+      "model_name_1": {
+        "metadata": {
+          "dataset_path": "...",
+          "subset": "...",
+          "split": "...",
+          "num_examples": int,
+          "f1_score": float,
+          "missing_labels": int,
+          "sample_size": int
+        },
+        "analysis": {
+          "num_counts": [...],
+          "num_hops": [...],
+          "business_impact_categories": {...},
+          "failure_mode_categories": {...},
+          ... (all other analysis fields)
+        }
+      },
+      "model_name_2": {...},
+      ...
+    }
+    
+    Args:
+        model_name (str): Name of the model being evaluated
+        analysis_dict (dict): Analysis dictionary containing various metrics and categories
+        dataset_path (str): Path to the dataset used
+        subset (str): Dataset subset used
+        split (str): Dataset split used
+        num_examples (int): Number of examples evaluated
+        f1_score (float): F1 score achieved
+        missing_labels (int): Number of missing labels
+        sample_size (int): Sample size used for evaluation
+    """
+    consolidated_file_path = "log/consolidated_analysis.json"
+
+    # Load existing consolidated data
+    if os.path.exists(consolidated_file_path):
+        with open(consolidated_file_path, 'r') as f:
+            consolidated_data = json.load(f)
+    else:
+        consolidated_data = {}
+
+    # Create metadata for this run
+    metadata = {
+        "dataset_path": dataset_path,
+        "subset": subset,
+        "split": split,
+        "num_examples": num_examples,
+        "f1_score": float(f1_score),
+        "missing_labels": missing_labels,
+        "sample_size": sample_size
+    }
+
+    # Update with current model's data (overwrite if exists)
+    consolidated_data[model_name] = {
+        "metadata": metadata,
+        "analysis": analysis_dict
+    }
+
+    # Ensure log directory exists and save consolidated file
+    os.makedirs(os.path.dirname(consolidated_file_path), exist_ok=True)
+    with open(consolidated_file_path, 'w') as f:
+        json.dump(consolidated_data, f, indent=2, cls=JsonSetEncoder)
+
+    print(f"Consolidated analysis updated in {consolidated_file_path} for model: {model_name}")
