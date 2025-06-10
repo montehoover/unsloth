@@ -95,6 +95,7 @@ def get_stats(outputs, dataset, multirule=False, relaxed_parsing=False):
     predicted_labels = []
     false_negatives = []  
     false_positives = []  # The transcript was fine but we flagged a violation.
+    true_positives = []  # Successful identification of a violation.
     rule_violations = {"missed": 0, "extra": 0}
     for i, (example, output_text) in enumerate(zip(dataset, outputs)):
         ground_truth_text = example[UNSLOTH_OUTPUT_FIELD]
@@ -118,15 +119,18 @@ def get_stats(outputs, dataset, multirule=False, relaxed_parsing=False):
             # When it gets it right that some rules were violated, check to see if it marked the right rules.
             if predicted_label == "FAIL" and ground_truth_label == "FAIL":
                 update_rule_violations(ground_truth_label, output_text, rule_violations)
-            
+
         if predicted_label == "PASS" and ground_truth_label == "FAIL":
             false_negatives.append(i)
         if predicted_label == "FAIL" and ground_truth_label == "PASS":
             false_positives.append(i)
+        if predicted_label == "FAIL" and ground_truth_label == "FAIL":
+            true_positives.append(i)
 
     percent_pass = ground_truth_labels.count("PASS") / len(ground_truth_labels)
     predicted_labels, nulls = filter_nulls(ground_truth_labels, predicted_labels)
     accuracy = accuracy_score(ground_truth_labels, predicted_labels)
+    recall = len(true_positives) / ground_truth_labels.count("FAIL") 
     try:
         f1 = f1_score(ground_truth_labels, predicted_labels, pos_label="FAIL")
     except ValueError as e:
@@ -143,6 +147,7 @@ def get_stats(outputs, dataset, multirule=False, relaxed_parsing=False):
     stats = {
         "accuracy": accuracy,
         "f1_score": f1,
+        "recall": recall,
         "false_positives": false_positives,
         "false_negatives": false_negatives,
         "nulls": nulls,

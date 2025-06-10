@@ -12,7 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
-from constants import LLAMAGUARD_TEMPLATE, METADATA, MULTIRULE_SYSTEM_PROMPT_V2, MULTIRULE_SYSTEM_PROMPT_V2_NON_COT, MULTIRULE_SYSTEM_PROMPT_V3, MULTIRULE_SYSTEM_PROMPT_V4, NEMOGUARD_TEMPLATE, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, SYSTEM_PROMPT_EXPERIMENTAL, SYSTEM_PROMPT_EXPERIMENTAL2, SYSTEM_PROMPT_NON_COT, UNSLOTH_INPUT_FIELD
+from constants import LLAMAGUARD_TEMPLATE, METADATA, MULTIRULE_SYSTEM_PROMPT_V2, MULTIRULE_SYSTEM_PROMPT_V2_NON_COT, MULTIRULE_SYSTEM_PROMPT_V3, MULTIRULE_SYSTEM_PROMPT_V4, MULTIRULE_SYSTEM_PROMPT_V5, NEMOGUARD_TEMPLATE, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, SYSTEM_PROMPT_EXPERIMENTAL, SYSTEM_PROMPT_EXPERIMENTAL2, SYSTEM_PROMPT_NON_COT, UNSLOTH_INPUT_FIELD
 from helpers import ComplianceProjectError, apply_llamaguard_template, configure_logging, confirm_model_compatibility, get_analysis, get_stats, confirm_dataset_compatibility, map_llamaguard_output, save_results, create_enriched_outputs, save_consolidated_outputs, save_consolidated_analysis
 
 from dotenv import load_dotenv, find_dotenv
@@ -20,6 +20,9 @@ load_dotenv(find_dotenv())
 
 import logging
 logger = logging.getLogger(__name__)
+
+if os.path.exists("/scratch0/.cache"):
+    shutil.rmtree("/scratch0/.cache", ignore_errors=True)
 
 
 TEMP_PATH = f"temp_{time.time_ns()}"
@@ -50,6 +53,8 @@ def add_to_csv(
     f1_stdev=None,
     mod_f1_score=None,
     missing_labels_score=None,
+    recall=None,
+    false_positive_rate=None,
 ):
     file_exists = os.path.isfile(csv_filename)
 
@@ -57,9 +62,9 @@ def add_to_csv(
         writer = csv.writer(f)
         # Write header if file is new
         if not file_exists:
-            writer.writerow(['model_name', 'test_set', 'f1_score', 'f1_stdev', 'missing_labels'])
+            writer.writerow(['model_name', 'test_set', 'f1_score', 'f1_stdev', 'missing_labels', 'recall', 'false_positive_rate'])
         # Append the new row
-        writer.writerow([model_name, test_set, f1_score, f1_stdev, missing_labels_score])
+        writer.writerow([model_name, test_set, f1_score, f1_stdev, missing_labels_score, recall, false_positive_rate])
 
 def get_hf_model(model_path, lora_path):
     base_model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
@@ -86,21 +91,34 @@ def main(args):
         dataset.shuffle(seed=42)
     dataset = dataset.select(range(n))
 
-    # Model 
+    # Model
+    if "qwen3" in args.model.lower():
+        if args.use_cot:
+            temperature = 0.6
+            top_p = 0.95
+            top_k = 20
+        else:
+            temperature = 0.7
+            top_p = 0.8
+            top_k = 20
+    else:
+        temperature = args.temperature
+        top_p = 1.0
+        top_k = args.top_k 
     if "gpt" in args.model or "together_ai" in args.model:
         if args.use_batch_api:
-            model = BatchApiModelWrapper(args.model, args.temperature)
+            model = BatchApiModelWrapper(args.model, temperature=temperature)
         else:
-            model = ApiModelWrapper(args.model, args.temperature, args.api_delay, args.retries)
+            model = ApiModelWrapper(args.model, temperature=temperature, api_delay=args.api_delay, retries=args.retries)
     else:
         if args.lora_path:
             model_path = get_hf_model(args.model, args.lora_path)
         else:
             model_path = args.model
         if args.use_vllm and "nemoguard" not in model_path:
-            model = VllmModelWrapper(model_path, args.temperature, args.top_k, args.max_new_tokens)
+            model = VllmModelWrapper(model_path, temperature=temperature, top_k=top_k, top_p=top_p, max_new_tokens=args.max_new_tokens, max_model_len=args.max_model_len)
         else:
-            model = HfModelWrapper(model_path, args.temperature, args.top_k, args.max_new_tokens)
+            model = HfModelWrapper(model_path, temperature=temperature, top_k=top_k, top_p=top_p, max_new_tokens=args.max_new_tokens)
     
     # Generation
     if "Llama-Guard" in args.model:
@@ -109,20 +127,18 @@ def main(args):
     elif "nemoguard" in args.model:
         sys_prompt = NEMOGUARD_TEMPLATE
         template_fn = apply_llamaguard_template
-    elif args.multirule:
-        sys_prompt = MULTIRULE_SYSTEM_PROMPT_V4
-        template_fn = model.apply_chat_template_cot if args.use_cot else model.apply_chat_template
     else:
-        sys_prompt = SYSTEM_PROMPT if args.use_cot else SYSTEM_PROMPT_NON_COT
-        template_fn = model.apply_chat_template_cot if args.use_cot else model.apply_chat_template
+        sys_prompt = MULTIRULE_SYSTEM_PROMPT_V5
+        template_fn = model.apply_chat_template
 
     if "wildguard" in args.model:
         messages = [f"<s>[INST]{sys_prompt}\n{x[UNSLOTH_INPUT_FIELD]}[/INST]" for x in dataset]
     else:
-        messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD]) for x in dataset]
+        messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD], enable_thinking=args.use_cot) for x in dataset]
 
     accuracies = []
     f1_scores = []
+    recalls = []
     false_positives = 0
     false_negatives = 0
     missing_labels = 0
@@ -155,6 +171,7 @@ def main(args):
 
         accuracies.append(stats["accuracy"])
         f1_scores.append(stats["f1_score"])
+        recalls.append(stats["recall"])
         false_positives += len(stats["false_positives"])
         false_negatives += len(stats["false_negatives"])
         missing_labels += len(stats["nulls"])
@@ -175,11 +192,15 @@ def main(args):
     print(f"Raw accuracy per sample: {accuracies}")
     accuracies = np.array(accuracies)
     f1_scores = np.array(f1_scores)
+    recalls = np.array(recalls)
+    false_positive_rate = false_positives / (args.sample_size * len(dataset))
     print(f"Accuracy: {np.mean(accuracies):.2%} ")
     print(f"F1 Score: {np.mean(f1_scores):.2%}")
+    print(f"Recall: {np.mean(recalls):.2%}")
     print(f"Accuracy standard deviation = {accuracies.std():.2%}")
     print(f"F1 Score standard deviation = {f1_scores.std():.2%}")
     print(f"False Positives: {false_positives} ({false_positives / args.sample_size:0.2f} per sample)")
+    print(f"False Positive Rate: {false_positive_rate:.2%}")
     print(f"False Negatives: {false_negatives} ({false_negatives / args.sample_size:0.2f} per sample)")
     print(f"Missing expected label: {missing_labels} ({missing_labels  / args.sample_size:0.2f} per sample)")
     print(f"False Positive examples: {sorted(false_positive_examples)}")
@@ -195,23 +216,25 @@ def main(args):
     if "lora_mix" in parts:
         model_name += "_lora_32000_mix"
     output_path = f"log/{model_name}/{time.time_ns()}"
-    enriched_outputs = create_enriched_outputs(dataset, outputs, false_positive_examples, false_negative_examples, missing_label_examples)
-    datasets.Dataset.from_list(enriched_outputs).to_json(f"{output_path}/outputs.jsonl")
+    if args.enriched_outputs:
+        output_text = create_enriched_outputs(dataset, outputs, false_positive_examples, false_negative_examples, missing_label_examples)
+        # Append to outputs from previous runs
+        save_consolidated_outputs(
+            model_name=model_name,
+            enriched_outputs=enriched_outputs,
+            dataset_path=args.dataset_path,
+            subset=args.subset,
+            split=args.split,
+            num_examples=len(dataset),
+            f1_score=np.mean(f1_scores),
+            f1_stdev=f1_scores.std(),
+            missing_labels=missing_labels,
+            sample_size=args.sample_size
+        )
+    else:
+        output_text = [{"output": output, "metadata": dataset[i]} for i, output in enumerate(outputs)]
+    datasets.Dataset.from_list(output_text).to_json(f"{output_path}/outputs.jsonl")
     print(f"Outputs saved to {output_path}/outputs.jsonl")
-
-    # Append to outputs from previous runs
-    save_consolidated_outputs(
-        model_name=model_name,
-        enriched_outputs=enriched_outputs,
-        dataset_path=args.dataset_path,
-        subset=args.subset,
-        split=args.split,
-        num_examples=len(dataset),
-        f1_score=np.mean(f1_scores),
-        f1_stdev=f1_scores.std(),
-        missing_labels=missing_labels,
-        sample_size=args.sample_size
-    )
 
     # Append results to csv
     # if os.path.exists("log/summary.csv"):
@@ -227,6 +250,8 @@ def main(args):
         f1_score=np.mean(f1_scores),
         f1_stdev=f1_scores.std(),
         missing_labels_score=missing_rate,
+        recall= np.mean(recalls),
+        false_positive_rate=false_positive_rate,
     ) 
 
 
@@ -261,14 +286,14 @@ def main(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert model to HuggingFace format")
-    parser.add_argument('--model', default="gpt-4o-mini", type=str, help="Model name to load")
+    # parser.add_argument('--model', default="gpt-4o-mini", type=str, help="Model name to load")
     # parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct", type=str, help="Model name to load")
-    # parser.add_argument("--model", default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/huggingface_grpo/lora_mix", type=str, help="Model name to load")
+    parser.add_argument("--model", default="tomg-group-umd/Qwen3-8B_train_80k_mix_sft_lr1e-5_bs128_ep1_grpo_ex3000_lr1e-6_bs48_len1024", type=str, help="Model name to load")
     parser.add_argument("--lora_path",  default=None, type=str, help="Path to lora adapter")
     # parser.add_argument("--lora_path",  default="/fs/cml-projects/guardian_models/models/Qwen2.5-7B-Instruct/lora_7500/epoch_2", type=str, help="Path to lora adapter")
     
-    parser.add_argument("--dataset_path", default="/Users/monte/code/system-prompt-compliance/output/formatted/compliance/test_handcrafted_v2.jsonl", type=str, help="Path to dataset")
-    # parser.add_argument("--dataset_path", default="tomg-group-umd/compliance", type=str, help="Path to dataset")
+    # parser.add_argument("--dataset_path", default="/Users/monte/code/system-prompt-compliance/output/formatted/compliance/test_handcrafted_v2.jsonl", type=str, help="Path to dataset")
+    parser.add_argument("--dataset_path", default="tomg-group-umd/compliance", type=str, help="Path to dataset")
     parser.add_argument("--subset", default="compliance", type=str, help="Subset of the dataset to use")
     parser.add_argument("--split", default="test_handcrafted", type=str, help="Split of the dataset to use")
     
@@ -288,11 +313,13 @@ def parse_args():
     parser.add_argument("--sample_size", default=1, type=int, help="Number of samples used to calculate statistics.")
     parser.add_argument("--use_cot", default=True, action=argparse.BooleanOptionalAction, help="Use COT for generation")
     parser.add_argument("--multirule", default=True, action=argparse.BooleanOptionalAction, help="Use multirule evaluation")
-    parser.add_argument("--handcrafted_analysis", default=True, action=argparse.BooleanOptionalAction, help="do handcrafted analysis")
+    parser.add_argument("--handcrafted_analysis", default=False, action=argparse.BooleanOptionalAction, help="do handcrafted analysis")
     parser.add_argument("--go_twice", default=False, action=argparse.BooleanOptionalAction, help="Run the model twice to get a better accuracy")
     parser.add_argument("--relaxed_parsing", default=False, action=argparse.BooleanOptionalAction, help="Use relaxed parsing for finding PASS/FAIL between the xml tags")
-    parser.add_argument("--strict_metadata", default=True, action=argparse.BooleanOptionalAction, help="Fail fast with detailed error if metadata is missing instead of skipping examples")
+    parser.add_argument("--strict_metadata", default=False, action=argparse.BooleanOptionalAction, help="Fail fast with detailed error if metadata is missing instead of skipping examples")
     parser.add_argument("--collect_all", default=False, action=argparse.BooleanOptionalAction, help="Collect all outputs from multiple runs")
+    parser.add_argument("--enriched_outputs", default=False, action=argparse.BooleanOptionalAction, help="Enrich outputs with metadata and save to disk")
+
     return parser.parse_args()
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import LLM, SamplingParams
 
-from constants import COT_OPENING, LABEL_OPENING
+from constants import COT_OPENING, COT_OPENING_QWEN, LABEL_OPENING
 
 import logging
 logger = logging.getLogger(__name__)
@@ -25,15 +25,17 @@ class ComplianceProjectError(ValueError):
 
 class ModelWrapper:
     def get_message_template(self, system_content=None, user_content=None, assistant_content=None):
-        assistant_content = assistant_content or LABEL_OPENING
-        if system_content is None:
-            return [{'role': 'user', 'content': user_content}]
-        else:
-            return [
-                {'role': 'system', 'content': system_content},
-                {'role': 'user', 'content': user_content},
-                {'role': 'assistant', 'content': assistant_content},
-            ]
+        # assistant_content = assistant_content or LABEL_OPENING
+        message = []
+        if system_content is not None:
+            message.append({'role': 'system', 'content': system_content})
+        if user_content is not None:
+            message.append({'role': 'user', 'content': user_content})
+        if assistant_content is not None:
+            message.append({'role': 'assistant', 'content': assistant_content})
+        if not message:
+            raise ComplianceProjectError("No content provided for any role.")
+        return message
 
     def get_message_template_cot(self, system_content, user_content, assistant_content=None):
         assistant_content = assistant_content or COT_OPENING
@@ -46,85 +48,90 @@ class ModelWrapper:
     def apply_chat_template(self, system_content=None, user_content=None, assistant_content=None):
         return self.get_message_template(system_content, user_content, assistant_content)
     
-    def apply_chat_template_cot(self, system_content, user_content, assistant_content=None):
-        return self.get_message_template_cot(system_content, user_content, assistant_content)
+    # def apply_chat_template_cot(self, system_content, user_content, assistant_content=None):
+    #     return self.get_message_template_cot(system_content, user_content, assistant_content)
 
 
 class LocalModelWrapper(ModelWrapper):
-    def __init__(self, model_name, temperature=0.6, top_k=300, max_new_tokens=1000):
+    def __init__(self, model_name, temperature=0.6, top_k=20, top_p=0.95, min_p=0, max_new_tokens=1000):
         self.model_name = model_name
         self.temperature = temperature
         self.top_k = top_k
+        self.top_p = top_p
+        self.min_p = min_p
         self.max_new_tokens = max_new_tokens
         if "nemoguard" in model_name:
             self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
         else:
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.tokenizer.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
-
-    def apply_chat_template(self, system_content, user_content, assistant_content=None):
-        message = super().apply_chat_template(system_content, user_content, assistant_content)
-        try:
-            # prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
+    
+    def apply_chat_template(self, system_content, user_content, assistant_content=None, enable_thinking=True):
+        if assistant_content is not None:
+            # This works for both Qwen3 and non-Qwen3 models, and any time assistant_content is provided, it automatically adds the <think></think> pair before the content like we want for Qwen3 models.
+            message = self.get_message_template(system_content, user_content, assistant_content)
             prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
-        except Exception as e:
-            print(message)
-            raise
-        return prompt
-    
-    def apply_chat_template_cot(self, system_content, user_content, assistant_content=None):
-        message = super().apply_chat_template_cot(system_content, user_content, assistant_content)
-        prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
-        return prompt
-    
-    def apply_chat_template_cot_qwen(self, system_content, user_content, assistant_content=None):
-        message = [
-                {'role': 'system', 'content': system_content},
-                {'role': 'user', 'content': user_content},
-            ]
-        prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True, enable_thinking=True)
+        elif enable_thinking:
+            if "qwen3" in self.model_name.lower():
+                # Let the Qwen chat template handle the thinking token
+                message = self.get_message_template(system_content, user_content)
+                prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True, enable_thinking=True)
+                # The way the Qwen3 chat template works is it adds a <think></think> pair when enable_thinking=False, but for enable_thinking=True, it adds nothing. We want to force the token to be there.
+                prompt = prompt + f"\n{COT_OPENING_QWEN}"
+            else:
+                message = self.get_message_template(system_content, user_content, assistant_content=COT_OPENING_QWEN)
+                prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
+        else:
+            # This works for both Qwen3 and non-Qwen3 models. 
+            # When Qwen3 gets assistant_content, it automatically adds the <think></think> pair before the content like we want. And other models ignore the enable_thinking argument.
+            message = self.get_message_template(system_content, user_content, assistant_content=LABEL_OPENING)
+            prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True, enable_thinking=False)
         return prompt
 
 
 
 class HfModelWrapper(LocalModelWrapper):
-    def __init__(self, model_name, temperature=0.6, top_k=300, max_new_tokens=1000):
-        super().__init__(model_name, temperature, top_k, max_new_tokens)
+    def __init__(self, model_name, temperature=0.6, top_k=20, top_p=0.95, min_p=0, max_new_tokens=1000):
+        super().__init__(model_name, temperature, top_k, top_p, min_p, max_new_tokens)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, device_map="auto", torch_dtype=torch.bfloat16
         ).eval()
 
-    def get_response(self, message):
+    def get_response(self, message, temperature=None, top_k=None, top_p=None):
         inputs = self.tokenizer(message, return_tensors="pt").to(self.model.device)
         with torch.no_grad():
             output_content = self.model.generate(
                 **inputs,
                 max_new_tokens=self.max_new_tokens,
                 num_return_sequences=1,
-                temperature=self.temperature,
-                top_k=self.top_k,
+                temperature=temperature or self.temperature,
+                top_k=top_k or self.top_k,
+                top_p=top_p or self.top_p,
+                min_p=self.min_p,
                 pad_token_id=self.tokenizer.pad_token_id
             )
         output_text = self.tokenizer.decode(output_content[0], skip_special_tokens=True)
         return output_text
 
-    def get_responses(self, messages):
-        outputs = [self.get_response(message) for message in tqdm(messages)]
+    def get_responses(self, messages, temperature=None, top_k=None, top_p=None):
+        outputs = [self.get_response(message, temperature, top_k, top_p) for message in tqdm(messages)]
         return outputs
 
 
 class VllmModelWrapper(LocalModelWrapper):
-    def __init__(self, model_name, temperature=0.6, top_k=300, max_new_tokens=1000, max_model_len=8192):
+    def __init__(self, model_name, temperature=0.6, top_k=20, top_p=0.95, min_p=0, max_new_tokens=1000, max_model_len=8192):
         from vllm import LLM, SamplingParams
 
-        super().__init__(model_name, temperature, top_k, max_new_tokens)
+        super().__init__(model_name, temperature, top_k, top_p, min_p, max_new_tokens)
         self.model = LLM(model_name, max_model_len=max_model_len, gpu_memory_utilization=0.95)
 
-    def get_responses(self, messages):
+    def get_responses(self, messages, temperature=None, top_k=None, top_p=None):
         sampling_params = SamplingParams(
             max_tokens=self.max_new_tokens,
-            temperature=self.temperature,
-            top_k=self.top_k,
+            temperature=temperature or self.temperature,
+            top_k=top_k or self.top_k,
+            top_p=top_p or self.top_p,
+            min_p=self.min_p,
             seed=time.time_ns(),
         )
         # responses -> List[obj(prompt, outputs -> List[obj(text, ???)])]
