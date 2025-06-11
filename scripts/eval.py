@@ -12,17 +12,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
-from constants import LLAMAGUARD_TEMPLATE, METADATA, MULTIRULE_SYSTEM_PROMPT_V2, MULTIRULE_SYSTEM_PROMPT_V2_NON_COT, MULTIRULE_SYSTEM_PROMPT_V3, MULTIRULE_SYSTEM_PROMPT_V4, MULTIRULE_SYSTEM_PROMPT_V5, NEMOGUARD_TEMPLATE, SYSTEM_PROMPT, MULTIRULE_SYSTEM_PROMPT, SYSTEM_PROMPT_EXPERIMENTAL, SYSTEM_PROMPT_EXPERIMENTAL2, SYSTEM_PROMPT_NON_COT, UNSLOTH_INPUT_FIELD
-from helpers import ComplianceProjectError, apply_llamaguard_template, configure_logging, confirm_model_compatibility, get_analysis, get_stats, confirm_dataset_compatibility, map_llamaguard_output, save_results, create_enriched_outputs, save_consolidated_outputs, save_consolidated_analysis
+from constants import LLAMAGUARD_TEMPLATE, MULTIRULE_SYSTEM_PROMPT_V5, NEMOGUARD_TEMPLATE, UNSLOTH_INPUT_FIELD
+from helpers import apply_llamaguard_template, configure_logging, get_analysis, get_binary_classification_report, get_stats, confirm_dataset_compatibility, map_llamaguard_output, create_enriched_outputs, print_formatted_report, save_consolidated_outputs, save_consolidated_analysis
 
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
 
 import logging
 logger = logging.getLogger(__name__)
-
-if os.path.exists("/scratch0/.cache"):
-    shutil.rmtree("/scratch0/.cache", ignore_errors=True)
 
 
 TEMP_PATH = f"temp_{time.time_ns()}"
@@ -55,6 +52,7 @@ def add_to_csv(
     missing_labels_score=None,
     recall=None,
     false_positive_rate=None,
+    auc=None
 ):
     file_exists = os.path.isfile(csv_filename)
 
@@ -62,9 +60,9 @@ def add_to_csv(
         writer = csv.writer(f)
         # Write header if file is new
         if not file_exists:
-            writer.writerow(['model_name', 'test_set', 'f1_score', 'f1_stdev', 'missing_labels', 'recall', 'false_positive_rate'])
+            writer.writerow(['model_name', 'test_set', 'f1_score', 'f1_stdev', 'missing_labels', 'recall', 'false_positive_rate', 'auc'])
         # Append the new row
-        writer.writerow([model_name, test_set, f1_score, f1_stdev, missing_labels_score, recall, false_positive_rate])
+        writer.writerow([model_name, test_set, f1_score, f1_stdev, missing_labels_score, recall, false_positive_rate, auc])
 
 def get_hf_model(model_path, lora_path):
     base_model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
@@ -136,6 +134,12 @@ def main(args):
     else:
         messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD], enable_thinking=args.use_cot) for x in dataset]
 
+    if args.get_auc:
+        non_cot_messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD], enable_thinking=False) for x in dataset]
+        pos_label_probs, pos_label_logits = model.get_prediction_probs(non_cot_messages)
+        report = get_binary_classification_report(dataset, pos_label_probs, args.target_fpr)
+        print_formatted_report(report)
+
     accuracies = []
     f1_scores = []
     recalls = []
@@ -162,12 +166,16 @@ def main(args):
                 second_outputs = model.get_responses(messages)
                 outputs = [output if i not in second_output_indices else second_outputs[i] for i, output in enumerate(outputs)]
 
-        # Evaluation
+        # Gather stats
         if "GuardReasoner" in args.model:
             relaxed_parsing = True
         else:
             relaxed_parsing = args.relaxed_parsing
+        
         stats = get_stats(outputs, dataset, multirule=args.multirule, relaxed_parsing=relaxed_parsing)
+        auc = report.get("auc", None) if args.get_auc else None
+        if args.get_auc:
+            stats["auc"] = auc
 
         accuracies.append(stats["accuracy"])
         f1_scores.append(stats["f1_score"])
@@ -197,6 +205,7 @@ def main(args):
     print(f"Accuracy: {np.mean(accuracies):.2%} ")
     print(f"F1 Score: {np.mean(f1_scores):.2%}")
     print(f"Recall: {np.mean(recalls):.2%}")
+    print(f"AUC: {auc:.2%}")
     print(f"Accuracy standard deviation = {accuracies.std():.2%}")
     print(f"F1 Score standard deviation = {f1_scores.std():.2%}")
     print(f"False Positives: {false_positives} ({false_positives / args.sample_size:0.2f} per sample)")
@@ -217,11 +226,11 @@ def main(args):
         model_name += "_lora_32000_mix"
     output_path = f"log/{model_name}/{time.time_ns()}"
     if args.enriched_outputs:
-        output_text = create_enriched_outputs(dataset, outputs, false_positive_examples, false_negative_examples, missing_label_examples)
+        output_text_data = create_enriched_outputs(dataset, outputs, false_positive_examples, false_negative_examples, missing_label_examples)
         # Append to outputs from previous runs
         save_consolidated_outputs(
             model_name=model_name,
-            enriched_outputs=enriched_outputs,
+            enriched_outputs=output_text_data,
             dataset_path=args.dataset_path,
             subset=args.subset,
             split=args.split,
@@ -232,8 +241,8 @@ def main(args):
             sample_size=args.sample_size
         )
     else:
-        output_text = [{"output": output, "metadata": dataset[i]} for i, output in enumerate(outputs)]
-    datasets.Dataset.from_list(output_text).to_json(f"{output_path}/outputs.jsonl")
+        output_text_data = [{"output": output, "metadata": dataset[i]} for i, output in enumerate(outputs)]
+    datasets.Dataset.from_list(output_text_data).to_json(f"{output_path}/outputs.jsonl")
     print(f"Outputs saved to {output_path}/outputs.jsonl")
 
     # Append results to csv
@@ -252,6 +261,7 @@ def main(args):
         missing_labels_score=missing_rate,
         recall= np.mean(recalls),
         false_positive_rate=false_positive_rate,
+        auc=auc,
     ) 
 
 
@@ -319,6 +329,8 @@ def parse_args():
     parser.add_argument("--strict_metadata", default=False, action=argparse.BooleanOptionalAction, help="Fail fast with detailed error if metadata is missing instead of skipping examples")
     parser.add_argument("--collect_all", default=False, action=argparse.BooleanOptionalAction, help="Collect all outputs from multiple runs")
     parser.add_argument("--enriched_outputs", default=False, action=argparse.BooleanOptionalAction, help="Enrich outputs with metadata and save to disk")
+    parser.add_argument("--get_auc", default=True, action=argparse.BooleanOptionalAction, help="Calculate AUC for the model")
+    parser.add_argument("--target_fpr", default=0.05, type=float, help="Target false positive rate for AUC calculation")
 
     return parser.parse_args()
 

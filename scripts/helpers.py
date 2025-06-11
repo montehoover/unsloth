@@ -8,7 +8,7 @@ import datasets
 import matplotlib as mpl
 from matplotlib import pyplot as plt
 import pandas as pd
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_recall_curve, confusion_matrix, roc_curve, precision_score
 from constants import (
     COT_CLOSING,
     COT_OPENING,
@@ -89,6 +89,115 @@ def filter_nulls(ground_truth_labels, predicted_labels):
             # Guarantee that we get the wrong answer if we don't have a prediction.
             predicted_labels[i] = "FAIL" if ground_truth_labels[i] == "PASS" else "PASS"
     return predicted_labels, nulls
+
+def get_y_true(dataset):
+    ground_truth_labels = []
+    for example in dataset:
+        ground_truth_text = example[UNSLOTH_OUTPUT_FIELD]
+        ground_truth_label = extract_xml_answer(ground_truth_text, LABEL_OPENING, LABEL_CLOSING)
+        ground_truth_labels.append(ground_truth_label)
+    y_true = [1 if label == POS_LABEL else 0 for label in ground_truth_labels]
+    return y_true
+
+def get_binary_classification_report(dataset, y_prob, target_fpr=0.05):
+    """
+    Generates a full report for binary classification, including metrics at a target FPR.
+
+    Args:
+        dataset (list): A list of examples, where each example is a dictionary.
+        y_prob (np.array): An array of predicted probabilities for the positive class.
+        target_fpr (float, optional): The desired False Positive Rate to report metrics for.
+                                      Defaults to 0.05 (5%).
+
+    Returns:
+        dict: A dictionary containing key classification metrics, including a section for
+              the best F1 score and another for the performance at the target FPR.
+    """
+    y_true = get_y_true(dataset)
+
+    # --- Overall AUC ---
+    auc = roc_auc_score(y_true, y_prob)
+
+    # --- Part 1: Find metrics for the threshold that maximizes the F1 Score ---
+    precisions, recalls, pr_thresholds = precision_recall_curve(y_true, y_prob)
+    pr_curve_f1_scores = (2 * precisions[:-1] * recalls[:-1]) / (precisions[:-1] + recalls[:-1])
+    pr_curve_f1_scores = np.nan_to_num(pr_curve_f1_scores)
+
+    best_f1_idx = np.argmax(pr_curve_f1_scores)
+    best_f1_threshold = pr_thresholds[best_f1_idx]
+    best_f1_score = pr_curve_f1_scores[best_f1_idx]
+    recall_at_best_f1 = recalls[best_f1_idx]
+
+    y_pred_at_best_f1 = (y_prob >= best_f1_threshold).astype(int)
+    try:
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred_at_best_f1).ravel()
+        fpr_at_best_f1 = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+    except ValueError:
+        fpr_at_best_f1 = 0.0
+
+    # --- Part 2: Find metrics for the threshold that meets the target FPR ---
+    fpr_all, tpr_all, roc_thresholds = roc_curve(y_true, y_prob)
+
+    # Find the last threshold where the FPR is less than or equal to the target
+    valid_fpr_indices = np.where(fpr_all <= target_fpr)[0]
+    
+    threshold_for_fpr = None
+    recall_for_fpr = None
+    f1_for_fpr = None
+
+    if len(valid_fpr_indices) > 0:
+        target_idx = valid_fpr_indices[-1]
+        threshold_for_fpr = roc_thresholds[target_idx]
+        recall_for_fpr = tpr_all[target_idx] # Recall is the same as TPR
+
+        # Calculate precision and F1 at this specific threshold
+        y_pred_at_fpr = (y_prob >= threshold_for_fpr).astype(int)
+        precision_at_fpr = precision_score(y_true, y_pred_at_fpr, zero_division=0)
+        
+        if (precision_at_fpr + recall_for_fpr) > 0:
+            f1_for_fpr = 2 * (precision_at_fpr * recall_for_fpr) / (precision_at_fpr + recall_for_fpr)
+        else:
+            f1_for_fpr = 0.0
+
+    # --- Construct the final report ---
+    report = {
+        'auc': auc,
+        'best_f1_metrics': {
+            'probability_threshold': best_f1_threshold,
+            'f1_score': best_f1_score,
+            'recall': recall_at_best_f1,
+            'fpr': fpr_at_best_f1,
+        },
+        'target_fpr_metrics': {
+            'target_fpr': target_fpr,
+            'probability_threshold': threshold_for_fpr,
+            'f1_score': f1_for_fpr,
+            'recall': recall_for_fpr,
+        },
+    }
+    return report
+
+def print_formatted_report(report):
+    print("--- Classification Report ---")
+    print("\nOverall Performance:")
+    print(f"  AUC: {report['auc']:.4f}")
+
+    print("\nMetrics at Best F1-Score Threshold:")
+    best_f1_metrics = report['best_f1_metrics']
+    print(f"  Optimal Probability Threshold: {best_f1_metrics['probability_threshold']:.2e}")
+    print(f"  Best F1 Score: {best_f1_metrics['f1_score']:.2%}")
+    print(f"  Recall at Best F1: {best_f1_metrics['recall']:.2%}")
+    print(f"  FPR at Best F1: {best_f1_metrics['fpr']:.2%}")
+
+    print(f"\nMetrics at {report['target_fpr_metrics']['target_fpr']:.0%} Target FPR:")
+    target_fpr_metrics = report['target_fpr_metrics']
+    if target_fpr_metrics['probability_threshold'] is not None:
+        print(f"  Probability Threshold for Target FPR: {target_fpr_metrics['probability_threshold']:.2e}")
+        print(f"  F1 Score at Target FPR: {target_fpr_metrics['f1_score']:.2%}")
+        print(f"  Recall at Target FPR: {target_fpr_metrics['recall']:.2%}")
+    else:
+        print("  Could not achieve the target FPR.")
+    print("\n---------------------------")
 
 def get_stats(outputs, dataset, multirule=False, relaxed_parsing=False):
     ground_truth_labels = []

@@ -11,7 +11,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import LLM, SamplingParams
 
-from constants import COT_OPENING, COT_OPENING_QWEN, LABEL_OPENING
+from constants import COT_OPENING, COT_OPENING_QWEN, LABEL_OPENING, NEG_LABEL, POS_LABEL
 
 import logging
 logger = logging.getLogger(__name__)
@@ -84,10 +84,9 @@ class LocalModelWrapper(ModelWrapper):
         else:
             # This works for both Qwen3 and non-Qwen3 models. 
             # When Qwen3 gets assistant_content, it automatically adds the <think></think> pair before the content like we want. And other models ignore the enable_thinking argument.
-            message = self.get_message_template(system_content, user_content, assistant_content=LABEL_OPENING)
+            message = self.get_message_template(system_content, user_content, assistant_content=f"{LABEL_OPENING}\n")
             prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True, enable_thinking=False)
         return prompt
-
 
 
 class HfModelWrapper(LocalModelWrapper):
@@ -96,7 +95,29 @@ class HfModelWrapper(LocalModelWrapper):
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, device_map="auto", torch_dtype=torch.bfloat16
         ).eval()
-
+    
+    def get_prediction(self, message, strict=False):
+        pos_token_id = self.tokenizer.encode(POS_LABEL, add_special_tokens=False)[0]
+        neg_token_id = self.tokenizer.encode(NEG_LABEL, add_special_tokens=False)[0]
+        
+        inputs = self.tokenizer(message, return_tensors="pt").to(self.model.device)
+        logits = self.model(**inputs).logits
+        prediction_logits = logits[0, -1, :] # Next token prediction logits are last in the sequence
+        predicted_token_id = torch.argmax(prediction_logits).item()
+        if not predicted_token_id in [pos_token_id, neg_token_id] and strict:
+            predicted_token = self.tokenizer.decode(predicted_token_id, skip_special_tokens=True)
+            raise ComplianceProjectError(f"The next token prediction was neither {POS_LABEL} nor {NEG_LABEL}. Instead it was '{predicted_token}'. Consider debugging by getting the full generation to see what is happening.")
+        
+        prediction_probs = torch.nn.functional.softmax(prediction_logits, dim=-1)
+        pos_prob = prediction_probs[pos_token_id].item()
+        pos_logit = prediction_logits[pos_token_id].item()
+        return pos_prob, pos_logit
+        
+    def get_prediction_probs(self, messages, strict=False):
+        pos_token_probs_logits = [self.get_prediction(message, strict) for message in tqdm(messages)]
+        pos_token_probs, pos_label_logits = zip(*pos_token_probs_logits)
+        return pos_token_probs, pos_label_logits
+        
     def get_response(self, message, temperature=None, top_k=None, top_p=None):
         inputs = self.tokenizer(message, return_tensors="pt").to(self.model.device)
         with torch.no_grad():
@@ -108,13 +129,14 @@ class HfModelWrapper(LocalModelWrapper):
                 top_k=top_k or self.top_k,
                 top_p=top_p or self.top_p,
                 min_p=self.min_p,
-                pad_token_id=self.tokenizer.pad_token_id
+                pad_token_id=self.tokenizer.pad_token_id,
             )
         output_text = self.tokenizer.decode(output_content[0], skip_special_tokens=True)
         return output_text
 
-    def get_responses(self, messages, temperature=None, top_k=None, top_p=None):
-        outputs = [self.get_response(message, temperature, top_k, top_p) for message in tqdm(messages)]
+
+    def get_responses(self, messages, temperature=None, top_k=None, top_p=None, threshold=None):
+        outputs = [self.get_response(message, temperature, top_k, top_p, threshold) for message in tqdm(messages)]
         return outputs
 
 
@@ -138,6 +160,36 @@ class VllmModelWrapper(LocalModelWrapper):
         responses = self.model.generate(messages, sampling_params=sampling_params)
         outputs = [response.outputs[0].text for response in responses]
         return outputs
+    
+    def get_prediction_probs(self, messages, strict=False):
+        pos_token_id = self.tokenizer.encode(POS_LABEL, add_special_tokens=False)[0]
+        neg_token_id = self.tokenizer.encode(NEG_LABEL, add_special_tokens=False)[0]
+    
+        sampling_params = SamplingParams(max_tokens=1, logprobs=20)
+        # responses -> List[obj(prompt, outputs -> List[obj(text, logprobs, index, token_ids, cumulative_logprobs)])]
+        # loggprobs -> List[{token_id: obj(logprob, rank, decoded_token)}]
+        responses = self.model.generate(messages, sampling_params=sampling_params)
+        pos_token_probs = []
+        for response in responses:
+            token_logprob_dict = response.outputs[0].logprobs[0]
+            if not (pos_token_id in token_logprob_dict or neg_token_id in token_logprob_dict) and strict:
+                raise ComplianceProjectError(f"The next token prediction was neither {POS_LABEL} nor {NEG_LABEL}. Instead we got '{token_logprob_dict}'. Consider debugging by getting the full generation to see what is happening.")
+            logprob_obj = token_logprob_dict.get(pos_token_id, None)
+            if logprob_obj is not None:
+                logprob = logprob_obj.logprob
+            else:
+                logprob = -100
+            pos_token_prob = self._logprob_to_prob(logprob)
+            pos_token_probs.append(pos_token_prob)
+        pos_label_logits = None
+        return pos_token_probs, pos_label_logits
+    
+    def _logprob_to_prob(self, logprob):
+        min_safe_input = torch.log(torch.tensor(torch.finfo(torch.float32).tiny))
+        max_safe_input = torch.log(torch.tensor(torch.finfo(torch.float32).max))
+        logprob = torch.clamp(torch.tensor(logprob), min=min_safe_input, max=max_safe_input)
+        prob = torch.exp(logprob).item()
+        return prob
 
 
 class ApiModelWrapper(ModelWrapper):
