@@ -12,8 +12,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
-from constants import LLAMAGUARD_TEMPLATE, MULTIRULE_SYSTEM_PROMPT_V5, NEMOGUARD_TEMPLATE, UNSLOTH_INPUT_FIELD
-from helpers import apply_llamaguard_template, configure_logging, get_analysis, get_binary_classification_report, get_stats, confirm_dataset_compatibility, map_llamaguard_output, create_enriched_outputs, print_formatted_report, save_consolidated_outputs, save_consolidated_analysis
+from constants import LLAMAGUARD_TEMPLATE, LLAMAGUARD_TEMPLATE2, MULTIRULE_SYSTEM_PROMPT_V5, NEMOGUARD_TEMPLATE, NEMOGUARD_TEMPLATE2, UNSLOTH_INPUT_FIELD
+from helpers import apply_llamaguard_template, configure_logging, extract_xml_answer, get_analysis, get_binary_classification_report, get_stats, confirm_dataset_compatibility, map_llamaguard_output, create_enriched_outputs, map_nemoguard_output, print_formatted_report, save_consolidated_outputs, save_consolidated_analysis
 
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
@@ -109,21 +109,23 @@ def main(args):
         else:
             model = ApiModelWrapper(args.model, temperature=temperature, api_delay=args.api_delay, retries=args.retries)
     else:
-        if args.lora_path:
+        if "nemoguard" in args.model:
+            model_path = get_hf_model("meta-llama/Meta-Llama-3.1-8B-Instruct", args.model)
+        elif args.lora_path:
             model_path = get_hf_model(args.model, args.lora_path)
         else:
             model_path = args.model
-        if args.use_vllm and "nemoguard" not in model_path:
+        if args.use_vllm: #and "nemoguard" not in model_path:
             model = VllmModelWrapper(model_path, temperature=temperature, top_k=top_k, top_p=top_p, max_new_tokens=args.max_new_tokens, max_model_len=args.max_model_len)
         else:
             model = HfModelWrapper(model_path, temperature=temperature, top_k=top_k, top_p=top_p, max_new_tokens=args.max_new_tokens)
     
     # Generation
     if "Llama-Guard" in args.model:
-        sys_prompt = LLAMAGUARD_TEMPLATE
+        sys_prompt = LLAMAGUARD_TEMPLATE2 if "wildguard" in args.subset else LLAMAGUARD_TEMPLATE
         template_fn = apply_llamaguard_template
     elif "nemoguard" in args.model:
-        sys_prompt = NEMOGUARD_TEMPLATE
+        sys_prompt = NEMOGUARD_TEMPLATE2 if "wildguard" in args.subset else NEMOGUARD_TEMPLATE
         template_fn = apply_llamaguard_template
     else:
         sys_prompt = MULTIRULE_SYSTEM_PROMPT_V5
@@ -131,6 +133,12 @@ def main(args):
 
     if "wildguard" in args.model:
         messages = [f"<s>[INST]{sys_prompt}\n{x[UNSLOTH_INPUT_FIELD]}[/INST]" for x in dataset]
+    elif ("Llama-Guard" in args.model or "nemoguard" in args.model):
+        if "wildguard" in args.subset:
+            get_transcript = lambda x: extract_xml_answer(x[UNSLOTH_INPUT_FIELD], "<transcript>", "</transcript>") if "<transcript>" in x[UNSLOTH_INPUT_FIELD] else x[UNSLOTH_INPUT_FIELD]
+            messages = [template_fn(sys_prompt, get_transcript(x)) for x in dataset]
+        else:
+            messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD]) for x in dataset]
     else:
         messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD], enable_thinking=args.use_cot) for x in dataset]
 
@@ -150,9 +158,13 @@ def main(args):
     false_negative_examples = []
     missing_label_examples = []
     for _ in range(args.sample_size):
-        outputs = model.get_responses(messages)
-        if "Llama-Guard" in args.model or "nemoguard" in args.model:
+        outputs = model.get_responses(messages, logit_bias_dict=args.logit_bias_dict)
+        if "Llama-Guard" in args.model:
+            original_outputs = outputs.copy()
             outputs = [map_llamaguard_output(output) for output in outputs]
+        elif "nemoguard" in args.model:
+            original_outputs = outputs.copy()
+            outputs = [map_nemoguard_output(output) for output in outputs]
 
         if args.go_twice:
             first_outputs = []
@@ -205,7 +217,8 @@ def main(args):
     print(f"Accuracy: {np.mean(accuracies):.2%} ")
     print(f"F1 Score: {np.mean(f1_scores):.2%}")
     print(f"Recall: {np.mean(recalls):.2%}")
-    print(f"AUC: {auc:.2%}")
+    if auc is not None:
+        print(f"AUC: {auc:.2%}")
     print(f"Accuracy standard deviation = {accuracies.std():.2%}")
     print(f"F1 Score standard deviation = {f1_scores.std():.2%}")
     print(f"False Positives: {false_positives} ({false_positives / args.sample_size:0.2f} per sample)")
@@ -241,7 +254,7 @@ def main(args):
             sample_size=args.sample_size
         )
     else:
-        output_text_data = [{"output": output, "metadata": dataset[i]} for i, output in enumerate(outputs)]
+        output_text_data = [{"output": output, "metadata": dataset[i]} for i, output in enumerate(original_outputs)]
     datasets.Dataset.from_list(output_text_data).to_json(f"{output_path}/outputs.jsonl")
     print(f"Outputs saved to {output_path}/outputs.jsonl")
 
@@ -288,7 +301,7 @@ def main(args):
             json.dump(analysis_dict, f, indent=4)
         print(f"Analysis saved to {output_path}/analysis.json")
     
-    if args.lora_path:
+    if args.lora_path or "nemoguard" in args.model:
         # Clean up temp files
         shutil.rmtree(TEMP_PATH, ignore_errors=True)
         logger.info(f"Temp files removed from {TEMP_PATH}")
@@ -312,7 +325,7 @@ def parse_args():
     parser.add_argument("--use_vllm", default=True, action=argparse.BooleanOptionalAction, help="Use VLLM for generation")
     parser.add_argument("--max_model_len", default=8192, type=int, help="Maximum context length for vllm. Should be based on the space of your gpu, not the model capabilities. If this is too high for the gpu, it will tell you.")
     # Generation parameters taken from gpt-fast
-    parser.add_argument("--max_new_tokens", default=8192, type=int, help="Maximum tokens to generate")
+    parser.add_argument("--max_new_tokens", default=1024, type=int, help="Maximum tokens to generate")
     parser.add_argument("--temperature", default=0.6, type=float, help="Generation temperature")
     parser.add_argument("--top_k", default=300, type=int, help="Top k tokens to consider")
     # API stuff
@@ -331,6 +344,7 @@ def parse_args():
     parser.add_argument("--enriched_outputs", default=False, action=argparse.BooleanOptionalAction, help="Enrich outputs with metadata and save to disk")
     parser.add_argument("--get_auc", default=True, action=argparse.BooleanOptionalAction, help="Calculate AUC for the model")
     parser.add_argument("--target_fpr", default=0.05, type=float, help="Target false positive rate for AUC calculation")
+    parser.add_argument("--logit_bias_dict", default=None, type=json.loads, help="Logit bias dictionary for the model. Should be a dict with token ids as keys and bias values as values. If not provided, no logit bias is applied.")
 
     return parser.parse_args()
 

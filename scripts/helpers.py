@@ -286,7 +286,7 @@ def confirm_dataset_compatibility(dataset, use_multirule):
             )
 
 def apply_llamaguard_template(system_content, user_content):
-    assert "rule" in system_content and "conversation" in system_content, f"Expected a llamaguard system template but got {system_content}"
+    # assert "rule" in system_content and "conversation" in system_content, f"Expected a llamaguard system template but got {system_content}"
     
     rule_idx = user_content.find(RULES_START)
     conversation_idx = user_content.find(TRANSCRIPT_START)
@@ -296,6 +296,18 @@ def apply_llamaguard_template(system_content, user_content):
     conversation = conversation.replace('\'User\'', 'User').replace('\'Agent\'', 'Agent')
 
     return system_content.format(rule=rule, conversation=conversation)
+
+def map_nemoguard_output(string_output):
+    try:
+        json_output = json.loads(string_output)
+    except Exception as e:
+        return 'null'
+    if json_output.get("Response Safety", "") == "unsafe":
+        return '<answer>FAIL</answer>'
+    elif json_output.get("Response Safety", "") == "safe":
+        return '<answer>PASS</answer>'
+    else:
+        return 'null'
 
 def map_llamaguard_output(output):
     if 'unsafe' in output:

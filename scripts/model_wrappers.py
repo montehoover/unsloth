@@ -1,15 +1,20 @@
 import asyncio
+import os
 import time
 import json
 import uuid
 
 import litellm
 import openai
+import tiktoken
 import datasets
 from tqdm import tqdm
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from huggingface_hub import snapshot_download
 from vllm import LLM, SamplingParams
+from vllm.lora.request import LoRARequest
+
 
 from constants import COT_OPENING, COT_OPENING_QWEN, LABEL_OPENING, NEG_LABEL, POS_LABEL
 
@@ -118,7 +123,13 @@ class HfModelWrapper(LocalModelWrapper):
         pos_token_probs, pos_label_logits = zip(*pos_token_probs_logits)
         return pos_token_probs, pos_label_logits
         
-    def get_response(self, message, temperature=None, top_k=None, top_p=None):
+    def get_response(self, message, temperature=None, top_k=None, top_p=None, logit_bias_dict=None):
+        if logit_bias_dict is not None:
+            token = list(logit_bias_dict.keys())[0]
+            bias = float(logit_bias_dict[token])
+            token_ids = self.tokenizer.encode(token, add_special_tokens=False)
+            logit_bias_dict = {tuple(token_ids): bias}
+
         inputs = self.tokenizer(message, return_tensors="pt").to(self.model.device)
         with torch.no_grad():
             output_content = self.model.generate(
@@ -130,24 +141,66 @@ class HfModelWrapper(LocalModelWrapper):
                 top_p=top_p or self.top_p,
                 min_p=self.min_p,
                 pad_token_id=self.tokenizer.pad_token_id,
+                sequence_bias=logit_bias_dict,
+                renormalize_logits=True, 
             )
-        output_text = self.tokenizer.decode(output_content[0], skip_special_tokens=True)
+        # keep only the newly generated tokens
+        prompt_len = inputs.input_ids.shape[-1]
+        new_token_ids = output_content[:, prompt_len:]
+        output_text = self.tokenizer.decode(new_token_ids[0], skip_special_tokens=True)
         return output_text
 
 
-    def get_responses(self, messages, temperature=None, top_k=None, top_p=None, threshold=None):
-        outputs = [self.get_response(message, temperature, top_k, top_p, threshold) for message in tqdm(messages)]
+    def get_responses(self, messages, temperature=None, top_k=None, top_p=None, logit_bias_dict=None):
+        outputs = [self.get_response(message, temperature, top_k, top_p, logit_bias_dict) for message in tqdm(messages)]
         return outputs
 
 
 class VllmModelWrapper(LocalModelWrapper):
     def __init__(self, model_name, temperature=0.6, top_k=20, top_p=0.95, min_p=0, max_new_tokens=1000, max_model_len=8192):
         from vllm import LLM, SamplingParams
-
         super().__init__(model_name, temperature, top_k, top_p, min_p, max_new_tokens)
-        self.model = LLM(model_name, max_model_len=max_model_len, gpu_memory_utilization=0.95)
+        self.model = LLM(model=model_name, max_model_len=max_model_len, gpu_memory_utilization=0.95)
+        
+    #     local_path = snapshot_download(model_name)
+    #     repo_type = self._detect_repo_type(local_path)
+        
+    #     if repo_type == "normal":
+    #         self.model = LLM(model=local_path, max_model_len=max_model_len, gpu_memory_utilization=0.95)
+    #         self.lora = None
+    #     elif repo_type == "lora":
+    #         base_repo = self._read_base_from_adapter(local_path)
+    #         self.model = LLM(model=base_repo, max_model_len=max_model_len, gpu_memory_utilization=0.95, enable_lora=True)
+    #         self.lora = LoRARequest(model_name, 1, local_path) #name, uid, adapter_path
+    #     else:
+    #         raise ComplianceProjectError(f"Unknown repository type for model {model_name}. Expected 'normal' or 'lora', got '{repo_type}'.")
 
-    def get_responses(self, messages, temperature=None, top_k=None, top_p=None):
+    # def _detect_repo_type(self, local_path: str) -> str:
+    #     """Return 'normal', 'lora', or 'unknown'."""
+    #     if os.path.exists(os.path.join(local_path, "config.json")) \
+    #     or os.path.exists(os.path.join(local_path, "params.json")):
+    #         return "normal"
+    #     if os.path.exists(os.path.join(local_path, "adapter_config.json")):
+    #         return "lora"
+    #     return "unknown"
+
+    # def _read_base_from_adapter(self, local_path: str) -> str:
+    #     """Parse adapter_config.json and return the base model name."""
+    #     cfg_file = os.path.join(local_path, "adapter_config.json")
+    #     with open(cfg_file) as f:
+    #         cfg = json.load(f)
+    #     for k in ("base_model_name_or_path", "base_model", "model_name"):
+    #         if k in cfg:
+    #             return cfg[k]
+    #     raise ValueError("LoRA adapter has no base-model field in adapter_config.json")
+
+    def get_responses(self, messages, temperature=None, top_k=None, top_p=None, logit_bias_dict=None):
+        if logit_bias_dict is not None:
+            token = list(logit_bias_dict.keys())[0]
+            bias = float(logit_bias_dict[token])
+            token_ids = self.tokenizer.encode(token, add_special_tokens=False)
+            logit_bias_dict = {token_id: bias for token_id in token_ids}
+
         sampling_params = SamplingParams(
             max_tokens=self.max_new_tokens,
             temperature=temperature or self.temperature,
@@ -155,9 +208,11 @@ class VllmModelWrapper(LocalModelWrapper):
             top_p=top_p or self.top_p,
             min_p=self.min_p,
             seed=time.time_ns(),
+            logit_bias=logit_bias_dict,
         )
         # responses -> List[obj(prompt, outputs -> List[obj(text, ???)])]
         responses = self.model.generate(messages, sampling_params=sampling_params)
+        # responses = self.model.generate(messages, sampling_params=sampling_params, lora_request=self.lora)
         outputs = [response.outputs[0].text for response in responses]
         return outputs
     
@@ -205,7 +260,14 @@ class ApiModelWrapper(ModelWrapper):
         self.completion_count = 0
         self.lock = asyncio.Lock()
 
-    def get_response(self, message):
+    def get_response(self, message, logit_bias_dict=None):
+        if logit_bias_dict is not None:
+            token = list(logit_bias_dict.keys())[0]
+            bias = float(logit_bias_dict[token])
+            enc = tiktoken.encoding_for_model(self.model_name)
+            token_ids = enc.encode(token)
+            logit_bias_dict = {token_id: bias for token_id in token_ids}
+
         success = False
         for _ in range(self.retries):
             try:
@@ -220,7 +282,8 @@ class ApiModelWrapper(ModelWrapper):
                     model=self.model_name,
                     max_tokens=self.max_new_tokens,
                     temperature=self.temperature,
-                    messages=message
+                    messages=message,
+                    logit_bias=logit_bias_dict,
                 )
                 if response['choices'][0]['message']['content'] is None:
                     logger.warning(f"Empty completion due to 'finish reason={response['choices'][0]['finish_reason']}'")
@@ -237,7 +300,13 @@ class ApiModelWrapper(ModelWrapper):
             raise ComplianceProjectError(f"Failed after {self.retries} retries.")
         return response['choices'][0]['message']['content']
 
-    async def aget_response(self, message):
+    async def aget_response(self, message, logit_bias_dict=None):
+        if logit_bias_dict is not None:
+            token = list(logit_bias_dict.keys())[0]
+            bias = float(logit_bias_dict[token])
+            enc = tiktoken.encoding_for_model(self.model_name)
+            token_ids = enc.encode(token)
+            logit_bias_dict = {token_id: bias for token_id in token_ids}
         success = False
         for _ in range(self.retries):
             try:
@@ -246,6 +315,7 @@ class ApiModelWrapper(ModelWrapper):
                     max_tokens=self.max_new_tokens,
                     temperature=self.temperature,
                     messages=message,
+                    logit_bias=logit_bias_dict,
                 )
                 success = True
                 break
@@ -262,15 +332,15 @@ class ApiModelWrapper(ModelWrapper):
         
         return response['choices'][0]['message']['content']
 
-    async def gather_responses(self, messages):
-        tasks = [self.aget_response(message) for message in tqdm(messages)]
+    async def gather_responses(self, messages, logit_bias_dict=None):
+        tasks = [self.aget_response(message, logit_bias_dict) for message in tqdm(messages)]
         logger.info(f"Starting round of {len(tasks)} API calls...")
         results = await asyncio.gather(*tasks)
         logger.info(f"Completed round of {len(tasks)} API calls.")
         self.completion_count = 0
         return results
     
-    def get_responses(self, messages):
+    def get_responses(self, messages, logit_bias_dict=None):
         if self.delay is None or self.delay == 0:
             # batch_size = self.max_batch_size
             # completed = 0
@@ -279,9 +349,9 @@ class ApiModelWrapper(ModelWrapper):
             #     batch = messages[completed:completed+batch_size]
             #     outputs += asyncio.run(self.gather_responses(batch))
             #     completed += batch_size
-            outputs = asyncio.run(self.gather_responses(messages))
+            outputs = asyncio.run(self.gather_responses(messages, logit_bias_dict))
         else:
-            outputs = [self.get_response(message) for message in tqdm(messages)]
+            outputs = [self.get_response(message, logit_bias_dict) for message in tqdm(messages)]
         return outputs
 
 class BatchApiModelWrapper(ModelWrapper):
