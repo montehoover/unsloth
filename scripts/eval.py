@@ -1,6 +1,6 @@
+import os
 import argparse
 import json
-import os
 import csv
 import shutil
 import time
@@ -12,8 +12,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
-from constants import LLAMAGUARD_TEMPLATE, LLAMAGUARD_TEMPLATE2, MULTIRULE_SYSTEM_PROMPT_V5, NEMOGUARD_TEMPLATE, NEMOGUARD_TEMPLATE2, UNSLOTH_INPUT_FIELD
-from helpers import apply_llamaguard_template, configure_logging, extract_xml_answer, get_analysis, get_binary_classification_report, get_stats, confirm_dataset_compatibility, map_llamaguard_output, create_enriched_outputs, map_nemoguard_output, print_formatted_report, save_consolidated_outputs, save_consolidated_analysis
+from constants import DYNAGUARD_AGENT_TAG, DYNAGUARD_CONTENT_TEMPLATE, DYNAGUARD_USER_TAG, GUARDREASONER_AGENT_TAG, GUARDREASONER_END_TAG, GUARDREASONER_START_TAG, GUARDREASONER_TEMPLATE, GUARDREASONER_TEMPLATE_COMPLIANCE, GUARDREASONER_USER_TAG, HARM_RULE, HARM_TEMPLATE, LLAMAGUARD_AGENT_TAG, LLAMAGUARD_TEMPLATE_COMPLIANCE, LLAMAGUARD_TEMPLATE, LLAMAGUARD_USER_TAG, MULTIRULE_SYSTEM_PROMPT_V5, NEMOGUARD_AGENT_TAG, NEMOGUARD_JSON_KEY, NEMOGUARD_TEMPLATE_COMPLIANCE, NEMOGUARD_TEMPLATE, INPUT_FIELD, NEMOGUARD_USER_TAG, OUTPUT_FIELD, POS_LABEL, SHIELDGEMMA_AGENT_TAG, SHIELDGEMMA_END_TAG, SHIELDGEMMA_START_TAG, SHIELDGEMMA_TEMPLATE, SHIELDGEMMA_TEMPLATE_COMPLIANCE, SHIELDGEMMA_USER_TAG, WILDGUARD_AGENT_TAG, WILDGUARD_TEMPLATE, WILDGUARD_TEMPLATE_COMPLIANCE, WILDGUARD_USER_TAG, WILDGUARD_START_TAG, WILDGUARD_END_TAG, DYNAGUARD_START_TAG, DYNAGUARD_END_TAG, LLAMAGUARD_START_TAG, LLAMAGUARD_END_TAG, NEMOGUARD_START_TAG, NEMOGUARD_END_TAG
+from helpers import format_user_agent_tags, get_dataset_labels, get_predicted_labels, get_transcript_from_safety_example, insert_rules_and_transcript_into_sysprompt, configure_logging, extract_xml_answer, get_analysis, get_binary_classification_report, get_stats, confirm_dataset_compatibility, map_llamaguard_output, create_enriched_outputs, map_nemoguard_output, print_formatted_report, save_consolidated_outputs, save_consolidated_analysis
 
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
@@ -25,23 +25,6 @@ logger = logging.getLogger(__name__)
 TEMP_PATH = f"temp_{time.time_ns()}"
 
 
-def compute_f1(total_pos: int,
-            false_positives: int,
-            false_negatives: int) -> float:
-    tp = total_pos - false_negatives
-    fp = false_positives
-    if tp + fp == 0:
-        precision = 0.0
-    else:
-        precision = tp / (tp + fp)
-    if total_pos == 0:
-        recall = 0.0
-    else:
-        recall = tp / total_pos
-    if precision + recall == 0:
-        return 0.0
-    return 2 * precision * recall / (precision + recall)
-
 def add_to_csv(
     csv_filename="log/summary.csv",
     model_name="Placeholder",
@@ -52,7 +35,10 @@ def add_to_csv(
     missing_labels_score=None,
     recall=None,
     false_positive_rate=None,
-    auc=None
+    auc=None,
+    f1_non_cot=None,
+    recall_non_cot=None,
+    fpr_non_cot=None,
 ):
     file_exists = os.path.isfile(csv_filename)
 
@@ -60,9 +46,9 @@ def add_to_csv(
         writer = csv.writer(f)
         # Write header if file is new
         if not file_exists:
-            writer.writerow(['model_name', 'test_set', 'f1_score', 'f1_stdev', 'missing_labels', 'recall', 'false_positive_rate', 'auc'])
+            writer.writerow(['model_name', 'test_set', 'f1_score', 'f1_stdev', 'missing_labels', 'recall', 'false_positive_rate', 'auc', 'f1_non_cot', 'recall_non_cot', 'fpr_non_cot'])
         # Append the new row
-        writer.writerow([model_name, test_set, f1_score, f1_stdev, missing_labels_score, recall, false_positive_rate, auc])
+        writer.writerow([model_name, test_set, f1_score, f1_stdev, missing_labels_score, recall, false_positive_rate, auc, f1_non_cot, recall_non_cot, fpr_non_cot])
 
 def get_hf_model(model_path, lora_path):
     base_model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
@@ -76,20 +62,44 @@ def get_hf_model(model_path, lora_path):
 
 def main(args):
     configure_logging(args.log_level)
-
+    #############
     # Dataset
+    #############
     if os.path.exists(args.dataset_path):
         dataset = datasets.load_dataset("json", data_files={"test": args.dataset_path})["test"]
     else:
-        dataset = datasets.load_dataset(args.dataset_path, args.subset, split=args.split)
-    confirm_dataset_compatibility(dataset, args.multirule)
+        if args.subset is not None:
+            dataset = datasets.load_dataset(args.dataset_path, args.subset, split=args.split)
+        else:
+            dataset = datasets.load_dataset(args.dataset_path, split=args.split)
+
+    # Preprocessing for external datasets
+    if args.label_col is not None:
+        print("Preprocessing dataset to remove rows with None, 'null', or empty labels.")
+        assert args.label_col in dataset.column_names, f"Label column {args.label_col} not found in dataset. Available columns: {dataset.column_names}"
+        # Filter out rows where label column is None, "null", or empty
+        def is_valid_row(example):
+            label = example[args.label_col]
+            if label is None:
+                return False
+            label_str = str(label).strip()
+            if label_str == "" or label_str.lower() == "null":
+                return False
+            return True
+        dataset = dataset.filter(is_valid_row)
+
+    # confirm_dataset_compatibility(dataset, args.multirule)
     n = args.num_examples if args.num_examples > 0 and args.num_examples < len(dataset) else len(dataset)
     # Shuffle to ensure we get a random subset. Don't shuffle if we're using the whole thing so we can keep track of indices for frequent misclassifications.
     if n < len(dataset):
         dataset.shuffle(seed=42)
     dataset = dataset.select(range(n))
 
+    #############
     # Model
+    #############
+    print("Loading model:", args.model)
+    custom_name = None
     if "qwen3" in args.model.lower():
         if args.use_cot:
             temperature = 0.6
@@ -104,6 +114,7 @@ def main(args):
         top_p = 1.0
         top_k = args.top_k 
     if "gpt" in args.model or "together_ai" in args.model:
+        args.get_auc = False
         if args.use_batch_api:
             model = BatchApiModelWrapper(args.model, temperature=temperature)
         else:
@@ -111,43 +122,120 @@ def main(args):
     else:
         if "nemoguard" in args.model:
             model_path = get_hf_model("meta-llama/Meta-Llama-3.1-8B-Instruct", args.model)
+            custom_name = args.model
         elif args.lora_path:
             model_path = get_hf_model(args.model, args.lora_path)
         else:
             model_path = args.model
-        if args.use_vllm: #and "nemoguard" not in model_path:
-            model = VllmModelWrapper(model_path, temperature=temperature, top_k=top_k, top_p=top_p, max_new_tokens=args.max_new_tokens, max_model_len=args.max_model_len)
+        if args.use_vllm:
+            model = VllmModelWrapper(model_path, temperature=temperature, top_k=top_k, top_p=top_p, max_new_tokens=args.max_new_tokens, max_model_len=args.max_model_len, custom_name=custom_name)
         else:
-            model = HfModelWrapper(model_path, temperature=temperature, top_k=top_k, top_p=top_p, max_new_tokens=args.max_new_tokens)
+            model = HfModelWrapper(model_path, temperature=temperature, top_k=top_k, top_p=top_p, max_new_tokens=args.max_new_tokens, custom_name=custom_name)
     
-    # Generation
-    if "Llama-Guard" in args.model:
-        sys_prompt = LLAMAGUARD_TEMPLATE2 if "wildguard" in args.subset else LLAMAGUARD_TEMPLATE
-        template_fn = apply_llamaguard_template
-    elif "nemoguard" in args.model:
-        sys_prompt = NEMOGUARD_TEMPLATE2 if "wildguard" in args.subset else NEMOGUARD_TEMPLATE
-        template_fn = apply_llamaguard_template
+    ###############
+    # Messages
+    ###############
+    print("Turning dataset into LLM message strings..")
+    is_compliance_dataset = args.subset is not None and "compliance" in args.subset #or "wildguard" in args.subset # We have a compliance-formatted version of the wildguard dataset.
+        
+    #########
+    # 1. Get the policies and transcripts
+    #########
+    if is_compliance_dataset:
+        # DynaGuard dataset:
+        transcripts = [extract_xml_answer(x[INPUT_FIELD], "<transcript>", "</transcript>") for x in dataset]
+        policies = [extract_xml_answer(x[INPUT_FIELD], "<rules>", "</rules>") for x in dataset]
+
+    else:
+        # Safety dataset:
+        assert args.input_cols is not None, "For safety datasets, you must provide --input_cols with the user prompt and agent response columns."
+        custom_columns = [col.strip() for col in args.input_cols.split(',')]
+        assert len(custom_columns) == 2, f"Expected exactly 2 columns for --input_cols, got {args.input_cols}"
+        transcripts = [get_transcript_from_safety_example(x, user_col=custom_columns[0], agent_col=custom_columns[1]) for x in dataset]
+        policies = [HARM_RULE for _ in range(len(dataset))]
+
+
+    ########
+    # 2. Get sys prompt templates and user/agent tags
+    ########
+    json_key = None
+    if "wildguard" in args.model.lower():
+        sys_prompt_template = WILDGUARD_TEMPLATE_COMPLIANCE if is_compliance_dataset else WILDGUARD_TEMPLATE
+        user_tag = WILDGUARD_USER_TAG
+        agent_tag = WILDGUARD_AGENT_TAG
+        label_start_tag = WILDGUARD_START_TAG
+        label_end_tag = WILDGUARD_END_TAG
+    elif "guardreasoner" in args.model.lower():
+        sys_prompt_template = GUARDREASONER_TEMPLATE_COMPLIANCE if is_compliance_dataset else GUARDREASONER_TEMPLATE
+        if not args.use_cot:
+            sys_prompt_template = sys_prompt_template.replace(
+                "You must think step by step. Keep consistency between the reasoning and the Answers.",
+                "DO NOT think step by step. Give the answers to the three tasks and nothing else.")
+        user_tag = GUARDREASONER_USER_TAG
+        agent_tag = GUARDREASONER_AGENT_TAG
+        label_start_tag = GUARDREASONER_START_TAG
+        label_end_tag = GUARDREASONER_END_TAG
+    elif "llama-guard" in args.model.lower():
+        sys_prompt_template = LLAMAGUARD_TEMPLATE_COMPLIANCE if is_compliance_dataset else LLAMAGUARD_TEMPLATE
+        user_tag = LLAMAGUARD_USER_TAG
+        agent_tag = LLAMAGUARD_AGENT_TAG
+        label_start_tag = LLAMAGUARD_START_TAG
+        label_end_tag = LLAMAGUARD_END_TAG
+    elif "nemoguard" in args.model.lower():
+        sys_prompt_template = NEMOGUARD_TEMPLATE_COMPLIANCE if is_compliance_dataset else NEMOGUARD_TEMPLATE
+        user_tag = NEMOGUARD_USER_TAG
+        agent_tag = NEMOGUARD_AGENT_TAG
+        label_start_tag = NEMOGUARD_START_TAG
+        label_end_tag = NEMOGUARD_END_TAG
+        json_key = NEMOGUARD_JSON_KEY
+    elif "shieldgemma" in args.model.lower():
+        sys_prompt_template = SHIELDGEMMA_TEMPLATE_COMPLIANCE if is_compliance_dataset else SHIELDGEMMA_TEMPLATE
+        user_tag = SHIELDGEMMA_USER_TAG
+        agent_tag = SHIELDGEMMA_AGENT_TAG
+        label_start_tag = SHIELDGEMMA_START_TAG
+        label_end_tag = SHIELDGEMMA_END_TAG
+    else:
+        # No template, just a system prompt with nothing to insert and the content goes in the user field
+        user_tag = DYNAGUARD_USER_TAG
+        agent_tag = DYNAGUARD_AGENT_TAG
+        label_start_tag = DYNAGUARD_START_TAG
+        label_end_tag = DYNAGUARD_END_TAG
+    
+    ##########
+    # 3. Get messages
+    ##########
+    transcripts = [format_user_agent_tags(transcript, user_tag, agent_tag) for transcript in transcripts]
+    # All the safety models
+    if any(s in args.model.lower() for s in ["llama-guard", "nemoguard", "guardreasoner", "wildguard", "shieldgemma"]):
+        sys_prompts = [sys_prompt_template.format(policy=policy, conversation=transcript) for policy, transcript in zip(policies, transcripts)]
+        messages          = [model.apply_chat_template(sys_prompt, enable_thinking=args.use_cot) for sys_prompt in sys_prompts]
+        non_cot_messages =  [model.apply_chat_template(sys_prompt, enable_thinking=False) for sys_prompt in sys_prompts]
+    # DynaGuard and all other models:
     else:
         sys_prompt = MULTIRULE_SYSTEM_PROMPT_V5
-        template_fn = model.apply_chat_template
+        messages         = [model.apply_chat_template(sys_prompt, DYNAGUARD_CONTENT_TEMPLATE.format(policy=policy, conversation=transcript), enable_thinking=args.use_cot) for policy, transcript in zip(policies, transcripts)]
+        non_cot_messages = [model.apply_chat_template(sys_prompt, DYNAGUARD_CONTENT_TEMPLATE.format(policy=policy, conversation=transcript), enable_thinking=False) for policy, transcript in zip(policies, transcripts)]
 
-    if "wildguard" in args.model:
-        messages = [f"<s>[INST]{sys_prompt}\n{x[UNSLOTH_INPUT_FIELD]}[/INST]" for x in dataset]
-    elif ("Llama-Guard" in args.model or "nemoguard" in args.model):
-        if "wildguard" in args.subset:
-            get_transcript = lambda x: extract_xml_answer(x[UNSLOTH_INPUT_FIELD], "<transcript>", "</transcript>") if "<transcript>" in x[UNSLOTH_INPUT_FIELD] else x[UNSLOTH_INPUT_FIELD]
-            messages = [template_fn(sys_prompt, get_transcript(x)) for x in dataset]
-        else:
-            messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD]) for x in dataset]
-    else:
-        messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD], enable_thinking=args.use_cot) for x in dataset]
-
+    #############
+    # Special non-thinking + logit bias section
+    #############
     if args.get_auc:
-        non_cot_messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD], enable_thinking=False) for x in dataset]
-        pos_label_probs, pos_label_logits = model.get_prediction_probs(non_cot_messages)
-        report = get_binary_classification_report(dataset, pos_label_probs, args.target_fpr)
+        print("Doing non-thinking eval including AUC and gathering logit bias suggestions...")
+        # non_cot_messages = [template_fn(sys_prompt, x[INPUT_FIELD], enable_thinking=False) for x in dataset]
+        prob_pairs, logit_pairs = model.get_prediction_probs(non_cot_messages)
+        report = get_binary_classification_report(dataset, prob_pairs, args.target_fpr, logit_pairs, 
+                                                  output_field=args.label_col if args.label_col else OUTPUT_FIELD,
+                                                  pos_label=args.pos_label if args.pos_label else POS_LABEL)
         print_formatted_report(report)
+    # EARLY EXIT FROM EVALUATION
+    if args.auc_only:
+        return
 
+    ###########
+    # Outputs
+    ###########
+    # Produce multiple outputs from these messages for error bands
+    print("Generating model outputs...")
     accuracies = []
     f1_scores = []
     recalls = []
@@ -157,35 +245,21 @@ def main(args):
     false_positive_examples = []
     false_negative_examples = []
     missing_label_examples = []
-    for _ in range(args.sample_size):
+    for i in range(args.sample_size):
+        print("Getting ready to get outputs...")
         outputs = model.get_responses(messages, logit_bias_dict=args.logit_bias_dict)
-        if "Llama-Guard" in args.model:
-            original_outputs = outputs.copy()
-            outputs = [map_llamaguard_output(output) for output in outputs]
-        elif "nemoguard" in args.model:
-            original_outputs = outputs.copy()
-            outputs = [map_nemoguard_output(output) for output in outputs]
-
-        if args.go_twice:
-            first_outputs = []
-            second_output_indices = []
-            for i, output in enumerate(outputs):
-                if "<answer>" not in output:
-                    first_outputs.append(output)
-                    second_output_indices.append(i)
-            if second_outputs:
-                messages = [template_fn(sys_prompt, x[UNSLOTH_INPUT_FIELD], f"{output}<answer>") for x, output in zip(dataset.select(second_output_indices), first_outputs)]
-                second_outputs = model.get_responses(messages)
-                outputs = [output if i not in second_output_indices else second_outputs[i] for i, output in enumerate(outputs)]
-
-        # Gather stats
-        if "GuardReasoner" in args.model:
-            relaxed_parsing = True
-        else:
-            relaxed_parsing = args.relaxed_parsing
         
-        stats = get_stats(outputs, dataset, multirule=args.multirule, relaxed_parsing=relaxed_parsing)
+        print(f"Round {i + 1} outputs complete. Now getting stats...")
+        ground_truth_labels = get_dataset_labels(dataset, custom_label_column=args.label_col, custom_pos_label=args.pos_label, custom_neg_label=args.neg_label)
+        print("Ground truth labels complete.")
+        predicted_labels = get_predicted_labels(outputs, start_tag=label_start_tag, end_tag=label_end_tag, json_key=json_key)
+        print("Predicted labels complete.")
+        stats = get_stats(ground_truth_labels, predicted_labels)
+        print(f"Stats complete.")
         auc = report.get("auc", None) if args.get_auc else None
+        f1_non_cot = report.get("f1", None) if args.get_auc else None
+        recall_non_cot = report.get("recall", None) if args.get_auc else None
+        fpr_non_cot = report.get("fpr", None) if args.get_auc else None
         if args.get_auc:
             stats["auc"] = auc
 
@@ -204,11 +278,15 @@ def main(args):
             false_positive_examples = stats["false_positives"]
             false_negative_examples = stats["false_negatives"]
             missing_label_examples = stats["nulls"]
+        
 
+    ##################
+    # Printing/Saving
+    ##################
+    print("Example input:", json.dumps(messages[0], indent=4))
+    print("Example output:", json.dumps(outputs[0], indent=4))
     if missing_label_examples:
-        # for i in missing_label_examples:
-        #     logger.notice(outputs[i])
-        logger.notice(json.dumps(outputs[missing_label_examples[0]], indent=4))
+        print("Missing label example:", json.dumps(outputs[missing_label_examples[0]], indent=4))
     print(f"Raw accuracy per sample: {accuracies}")
     accuracies = np.array(accuracies)
     f1_scores = np.array(f1_scores)
@@ -254,7 +332,7 @@ def main(args):
             sample_size=args.sample_size
         )
     else:
-        output_text_data = [{"output": output, "metadata": dataset[i]} for i, output in enumerate(original_outputs)]
+        output_text_data = [{"output": output, "metadata": dataset[i]} for i, output in enumerate(outputs)]
     datasets.Dataset.from_list(output_text_data).to_json(f"{output_path}/outputs.jsonl")
     print(f"Outputs saved to {output_path}/outputs.jsonl")
 
@@ -262,21 +340,26 @@ def main(args):
     # if os.path.exists("log/summary.csv"):
     missing_rate = missing_labels / (args.sample_size * len(dataset))
     total_pos = int((len(dataset) * args.sample_size - missing_labels) * (1-stats["percent_pass"]))
-    modifified_f1 = compute_f1(total_pos, false_positives, false_negatives)
     if args.lora_path:
         model_name = f"{model_name}_{args.lora_path.split('/')[-2]}"
+    if args.split == "val":
+        dataset_name = "val"
+    else:
+        dataset_name = args.subset if args.subset else args.dataset_path.split("/")[-1]
     add_to_csv(
         csv_filename="log/summary.csv", 
         model_name=model_name,
-        test_set=args.subset,
+        test_set=dataset_name,
         f1_score=np.mean(f1_scores),
         f1_stdev=f1_scores.std(),
         missing_labels_score=missing_rate,
         recall= np.mean(recalls),
         false_positive_rate=false_positive_rate,
         auc=auc,
+        f1_non_cot=f1_non_cot,
+        recall_non_cot=recall_non_cot,
+        fpr_non_cot=fpr_non_cot,
     ) 
-
 
     # Do analysis over length of dialogues and length of rules and stuff
     if args.handcrafted_analysis:
@@ -301,10 +384,10 @@ def main(args):
             json.dump(analysis_dict, f, indent=4)
         print(f"Analysis saved to {output_path}/analysis.json")
     
-    if args.lora_path or "nemoguard" in args.model:
+    if args.lora_path or "nemoguard" in args.model.lower():
         # Clean up temp files
         shutil.rmtree(TEMP_PATH, ignore_errors=True)
-        logger.info(f"Temp files removed from {TEMP_PATH}")
+        print(f"Temp files removed from {TEMP_PATH}")
 
 
 def parse_args():
@@ -317,8 +400,8 @@ def parse_args():
     
     # parser.add_argument("--dataset_path", default="/Users/monte/code/system-prompt-compliance/output/formatted/compliance/test_handcrafted_v2.jsonl", type=str, help="Path to dataset")
     parser.add_argument("--dataset_path", default="tomg-group-umd/compliance", type=str, help="Path to dataset")
-    parser.add_argument("--subset", default="compliance", type=str, help="Subset of the dataset to use")
-    parser.add_argument("--split", default="test_handcrafted", type=str, help="Split of the dataset to use")
+    parser.add_argument("--subset", default=None, type=str, help="Subset of the dataset to use")
+    parser.add_argument("--split", default=None, type=str, help="Split of the dataset to use")
     
     parser.add_argument("--num_examples", default=-1, type=int, help="Number of examples to evaluate")
     parser.add_argument("--log_level", default=None, type=str, help="Log level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "debug", "info", "warning", "error", "critical"])
@@ -345,6 +428,13 @@ def parse_args():
     parser.add_argument("--get_auc", default=True, action=argparse.BooleanOptionalAction, help="Calculate AUC for the model")
     parser.add_argument("--target_fpr", default=0.05, type=float, help="Target false positive rate for AUC calculation")
     parser.add_argument("--logit_bias_dict", default=None, type=json.loads, help="Logit bias dictionary for the model. Should be a dict with token ids as keys and bias values as values. If not provided, no logit bias is applied.")
+    parser.add_argument("--eval_with_target_fpr", default=False, action=argparse.BooleanOptionalAction, help="Run once to collect the logit bias required to achieve the target FPR. Then run again with this logit bias to get the final F1 score.")
+    parser.add_argument("--auc_only", default=False, action=argparse.BooleanOptionalAction, help="Run only the AUC calculation and not the full evaluation. Useful for debugging logit bias.")
+    parser.add_argument("--label_col", default=None, type=str, help="Custom label column to use for evaluation. If not provided, uses the default label column.")
+    parser.add_argument("--pos_label", default=None, type=str, help="Custom positive label to use for evaluation. If not provided, uses the default positive label.")
+    parser.add_argument("--neg_label", default=None, type=str, help="Custom negative label to use for evaluation. If not provided, uses the default negative label.")
+    parser.add_argument("--input_cols", type=str, default=None, help="Comma-separated list of column names to concatenate into the input field (e.g., 'prompt,response')"
+)
 
     return parser.parse_args()
 

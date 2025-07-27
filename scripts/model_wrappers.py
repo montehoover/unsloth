@@ -16,7 +16,7 @@ from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 
 
-from constants import COT_OPENING, COT_OPENING_QWEN, LABEL_OPENING, NEG_LABEL, POS_LABEL
+from constants import COT_OPENING, COT_OPENING_QWEN, GUARDREASONER_COT_OPENING, GUARDREASONER_LABEL_OPENING, LABEL_OPENING, NEG_LABEL, POS_LABEL
 
 import logging
 logger = logging.getLogger(__name__)
@@ -42,24 +42,22 @@ class ModelWrapper:
             raise ComplianceProjectError("No content provided for any role.")
         return message
 
-    def get_message_template_cot(self, system_content, user_content, assistant_content=None):
-        assistant_content = assistant_content or COT_OPENING
-        return [
-            {'role': 'system', 'content': system_content},
-            {'role': 'user', 'content': user_content},
-            {'role': 'assistant', 'content': assistant_content},
-        ]
-
-    def apply_chat_template(self, system_content=None, user_content=None, assistant_content=None):
-        return self.get_message_template(system_content, user_content, assistant_content)
+    def apply_chat_template(self, system_content=None, user_content=None, assistant_content=None, enable_thinking=None):
+        if assistant_content is None:
+            if enable_thinking:
+                assistant_content = COT_OPENING_QWEN + "\n"
+            else:
+                assistant_content = LABEL_OPENING + "\n"
+        prompt = self.get_message_template(system_content, user_content, assistant_content)
+        return prompt
     
     # def apply_chat_template_cot(self, system_content, user_content, assistant_content=None):
     #     return self.get_message_template_cot(system_content, user_content, assistant_content)
 
 
 class LocalModelWrapper(ModelWrapper):
-    def __init__(self, model_name, temperature=0.6, top_k=20, top_p=0.95, min_p=0, max_new_tokens=1000):
-        self.model_name = model_name
+    def __init__(self, model_name, temperature=0.6, top_k=20, top_p=0.95, min_p=0, max_new_tokens=1000, custom_name=None):
+        self.model_name = custom_name or model_name
         self.temperature = temperature
         self.top_k = top_k
         self.top_p = top_p
@@ -71,32 +69,67 @@ class LocalModelWrapper(ModelWrapper):
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.tokenizer.pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
     
-    def apply_chat_template(self, system_content, user_content, assistant_content=None, enable_thinking=True):
+    def apply_chat_template(self, system_content, user_content=None, assistant_content=None, enable_thinking=True):
+        """
+        Here we handle instructions for thinking or non-thinking mode, including the special tags and arguments needed for different types of models.
+        Before any of that, if we get assistant_content passed in, we let that override everything else.
+        """
         if assistant_content is not None:
             # This works for both Qwen3 and non-Qwen3 models, and any time assistant_content is provided, it automatically adds the <think></think> pair before the content like we want for Qwen3 models.
+            assert "wildguard" not in self.model_name.lower(), f"Gave assistant_content of {assistant_content} to model {self.model_name} but this type of model can only take a system prompt and that is it."
             message = self.get_message_template(system_content, user_content, assistant_content)
             prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
-        elif enable_thinking:
-            if "qwen3" in self.model_name.lower():
-                # Let the Qwen chat template handle the thinking token
-                message = self.get_message_template(system_content, user_content)
-                prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True, enable_thinking=True)
-                # The way the Qwen3 chat template works is it adds a <think></think> pair when enable_thinking=False, but for enable_thinking=True, it adds nothing. We want to force the token to be there.
-                prompt = prompt + f"\n{COT_OPENING_QWEN}"
-            else:
-                message = self.get_message_template(system_content, user_content, assistant_content=COT_OPENING_QWEN)
-                prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
         else:
-            # This works for both Qwen3 and non-Qwen3 models. 
-            # When Qwen3 gets assistant_content, it automatically adds the <think></think> pair before the content like we want. And other models ignore the enable_thinking argument.
-            message = self.get_message_template(system_content, user_content, assistant_content=f"{LABEL_OPENING}\n")
-            prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True, enable_thinking=False)
+            # Handle the peculiarities of different models first, then handle thinking/non-thinking for all other types of models
+            # All Safety models except GuardReasoner are non-thinking - there should be no option to "enable thinking"
+            # For GuardReasoner, we should have both thinking and non-thinking modes, but the thinking mode has a special opening tag
+            if "qwen3" in self.model_name.lower():
+                if enable_thinking:
+                    # Let the Qwen chat template handle the thinking token
+                    message = self.get_message_template(system_content, user_content)
+                    prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True, enable_thinking=True)
+                    # The way the Qwen3 chat template works is it adds a <think></think> pair when enable_thinking=False, but for enable_thinking=True, it adds nothing. We want to force the token to be there.
+                    prompt = prompt + f"\n{COT_OPENING_QWEN}"
+                else:
+                    message = self.get_message_template(system_content, user_content, assistant_content=f"{LABEL_OPENING}\n")
+                    prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True, enable_thinking=False)
+            elif "guardreasoner" in self.model_name.lower():
+                if enable_thinking:
+                    assistant_content = GUARDREASONER_COT_OPENING
+                else:
+                    assistant_content = GUARDREASONER_LABEL_OPENING
+                message = self.get_message_template(system_content, user_content, assistant_content)
+                prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
+            elif "wildguard" in self.model_name.lower():
+                # Ignore enable_thinking, there is no thinking mode
+                # Also, the wildguard tokenizer has no chat template so we make our own here
+                # Also, it ignores any user_content even if it is passed in.
+                prompt = f"<s><|user|>\n[INST] {system_content} [/INST]\n<|assistant|>"
+            elif "llama-guard" in self.model_name.lower() or "nemoguard" in self.model_name.lower():
+            # elif any(s in self.model_name.lower() for s in ["llama-guard", "nemoguard"]):
+                # The LlamaGuard-based models have a special chat template that is intended to take in a message-formatted list that alternates between user and assistant
+                # where "assistant" does not refer to LlamaGuard, but rather an external assistant that LlamaGuard will evaluate.
+                # This wraps the conversation in the LlamaGuard system prompt with 14 standard categories, but it doesn't allow for customization.
+                # So instead we write our own system prompt with custom categories and use the chat template tags shown here: https://www.llama.com/docs/model-cards-and-prompt-formats/llama-guard-3/
+                # Also, there is no enable_thinking option for these models, so we ignore it.
+                prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>{system_content}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+            elif "shieldgemma" in self.model_name.lower():
+                # ShieldGemma has a chat template similar to LlamaGuard where it takes in the user-assistant list, and as above, we recreate the template ourselves for greater flexibility. (Spoiler: the template is just a <bos> token.)
+                prompt = f"<bos>{system_content}"
+            # All other models
+            else:
+                if enable_thinking:
+                    assistant_content = COT_OPENING_QWEN + "\n"
+                else:
+                    assistant_content = LABEL_OPENING + "\n"
+                message = self.get_message_template(system_content, user_content, assistant_content)
+                prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
         return prompt
 
 
 class HfModelWrapper(LocalModelWrapper):
-    def __init__(self, model_name, temperature=0.6, top_k=20, top_p=0.95, min_p=0, max_new_tokens=1000):
-        super().__init__(model_name, temperature, top_k, top_p, min_p, max_new_tokens)
+    def __init__(self, model_name, temperature=0.6, top_k=20, top_p=0.95, min_p=0, max_new_tokens=1000, custom_name=None):
+        super().__init__(model_name, temperature, top_k, top_p, min_p, max_new_tokens, custom_name)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, device_map="auto", torch_dtype=torch.bfloat16
         ).eval()
@@ -115,13 +148,15 @@ class HfModelWrapper(LocalModelWrapper):
         
         prediction_probs = torch.nn.functional.softmax(prediction_logits, dim=-1)
         pos_prob = prediction_probs[pos_token_id].item()
+        neg_prob = prediction_probs[neg_token_id].item()
         pos_logit = prediction_logits[pos_token_id].item()
-        return pos_prob, pos_logit
+        neg_logit = prediction_logits[neg_token_id].item()
+        return (pos_prob, neg_prob), (pos_logit, neg_logit)
         
     def get_prediction_probs(self, messages, strict=False):
-        pos_token_probs_logits = [self.get_prediction(message, strict) for message in tqdm(messages)]
-        pos_token_probs, pos_label_logits = zip(*pos_token_probs_logits)
-        return pos_token_probs, pos_label_logits
+        probs_logits = [self.get_prediction(message, strict) for message in tqdm(messages)]
+        prob_pairs, logit_pairs = zip(*probs_logits)
+        return prob_pairs, logit_pairs
         
     def get_response(self, message, temperature=None, top_k=None, top_p=None, logit_bias_dict=None):
         if logit_bias_dict is not None:
@@ -157,42 +192,10 @@ class HfModelWrapper(LocalModelWrapper):
 
 
 class VllmModelWrapper(LocalModelWrapper):
-    def __init__(self, model_name, temperature=0.6, top_k=20, top_p=0.95, min_p=0, max_new_tokens=1000, max_model_len=8192):
+    def __init__(self, model_name, temperature=0.6, top_k=20, top_p=0.95, min_p=0, max_new_tokens=1000, max_model_len=8192, custom_name=None):
         from vllm import LLM, SamplingParams
-        super().__init__(model_name, temperature, top_k, top_p, min_p, max_new_tokens)
-        self.model = LLM(model=model_name, max_model_len=max_model_len, gpu_memory_utilization=0.95)
-        
-    #     local_path = snapshot_download(model_name)
-    #     repo_type = self._detect_repo_type(local_path)
-        
-    #     if repo_type == "normal":
-    #         self.model = LLM(model=local_path, max_model_len=max_model_len, gpu_memory_utilization=0.95)
-    #         self.lora = None
-    #     elif repo_type == "lora":
-    #         base_repo = self._read_base_from_adapter(local_path)
-    #         self.model = LLM(model=base_repo, max_model_len=max_model_len, gpu_memory_utilization=0.95, enable_lora=True)
-    #         self.lora = LoRARequest(model_name, 1, local_path) #name, uid, adapter_path
-    #     else:
-    #         raise ComplianceProjectError(f"Unknown repository type for model {model_name}. Expected 'normal' or 'lora', got '{repo_type}'.")
-
-    # def _detect_repo_type(self, local_path: str) -> str:
-    #     """Return 'normal', 'lora', or 'unknown'."""
-    #     if os.path.exists(os.path.join(local_path, "config.json")) \
-    #     or os.path.exists(os.path.join(local_path, "params.json")):
-    #         return "normal"
-    #     if os.path.exists(os.path.join(local_path, "adapter_config.json")):
-    #         return "lora"
-    #     return "unknown"
-
-    # def _read_base_from_adapter(self, local_path: str) -> str:
-    #     """Parse adapter_config.json and return the base model name."""
-    #     cfg_file = os.path.join(local_path, "adapter_config.json")
-    #     with open(cfg_file) as f:
-    #         cfg = json.load(f)
-    #     for k in ("base_model_name_or_path", "base_model", "model_name"):
-    #         if k in cfg:
-    #             return cfg[k]
-    #     raise ValueError("LoRA adapter has no base-model field in adapter_config.json")
+        super().__init__(model_name, temperature, top_k, top_p, min_p, max_new_tokens, custom_name)
+        self.model = LLM(model=model_name, max_model_len=max_model_len, gpu_memory_utilization=0.9)
 
     def get_responses(self, messages, temperature=None, top_k=None, top_p=None, logit_bias_dict=None):
         if logit_bias_dict is not None:
@@ -212,7 +215,6 @@ class VllmModelWrapper(LocalModelWrapper):
         )
         # responses -> List[obj(prompt, outputs -> List[obj(text, ???)])]
         responses = self.model.generate(messages, sampling_params=sampling_params)
-        # responses = self.model.generate(messages, sampling_params=sampling_params, lora_request=self.lora)
         outputs = [response.outputs[0].text for response in responses]
         return outputs
     
@@ -224,20 +226,26 @@ class VllmModelWrapper(LocalModelWrapper):
         # responses -> List[obj(prompt, outputs -> List[obj(text, logprobs, index, token_ids, cumulative_logprobs)])]
         # loggprobs -> List[{token_id: obj(logprob, rank, decoded_token)}]
         responses = self.model.generate(messages, sampling_params=sampling_params)
-        pos_token_probs = []
+        prob_pairs = []
         for response in responses:
             token_logprob_dict = response.outputs[0].logprobs[0]
             if not (pos_token_id in token_logprob_dict or neg_token_id in token_logprob_dict) and strict:
                 raise ComplianceProjectError(f"The next token prediction was neither {POS_LABEL} nor {NEG_LABEL}. Instead we got '{token_logprob_dict}'. Consider debugging by getting the full generation to see what is happening.")
-            logprob_obj = token_logprob_dict.get(pos_token_id, None)
-            if logprob_obj is not None:
-                logprob = logprob_obj.logprob
+            pos_logprob_obj = token_logprob_dict.get(pos_token_id, None)
+            neg_logprob_obj = token_logprob_dict.get(neg_token_id, None)
+            if pos_logprob_obj is not None:
+                logprob = pos_logprob_obj.logprob
             else:
                 logprob = -100
+            if neg_logprob_obj is not None:
+                neg_logprob = neg_logprob_obj.logprob
+            else:
+                neg_logprob = -100
             pos_token_prob = self._logprob_to_prob(logprob)
-            pos_token_probs.append(pos_token_prob)
-        pos_label_logits = None
-        return pos_token_probs, pos_label_logits
+            neg_token_prob = self._logprob_to_prob(neg_logprob)
+            prob_pairs.append((pos_token_prob, neg_token_prob))
+        logit_pairs = None
+        return prob_pairs, logit_pairs
     
     def _logprob_to_prob(self, logprob):
         min_safe_input = torch.log(torch.tensor(torch.finfo(torch.float32).tiny))
@@ -341,6 +349,7 @@ class ApiModelWrapper(ModelWrapper):
         return results
     
     def get_responses(self, messages, logit_bias_dict=None):
+        print("Starting to get responses for serial API calls...")
         if self.delay is None or self.delay == 0:
             # batch_size = self.max_batch_size
             # completed = 0
@@ -419,6 +428,7 @@ class BatchApiModelWrapper(ModelWrapper):
         return outputs
 
     def get_responses(self, messages):
+        print("Starting to get responses for batched call...")
         batch_size = self.max_batch_size
         completed = 0
         outputs = []

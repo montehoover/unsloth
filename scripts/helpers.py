@@ -8,7 +8,8 @@ import datasets
 import matplotlib as mpl
 from matplotlib import pyplot as plt
 import pandas as pd
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_recall_curve, confusion_matrix, roc_curve, precision_score
+import numpy as np
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_recall_curve, confusion_matrix, roc_curve, precision_score, recall_score
 from constants import (
     COT_CLOSING,
     COT_OPENING,
@@ -21,8 +22,8 @@ from constants import (
     TORCHTUNE_INPUT_FIELD,
     TORCHTUNE_OUTPUT_FIELD,
     TRANSCRIPT_END,
-    UNSLOTH_INPUT_FIELD,
-    UNSLOTH_OUTPUT_FIELD,
+    INPUT_FIELD,
+    OUTPUT_FIELD,
     LINE_CLOSING,
     LINE_OPENING,
     NUM_RULES_METADATA,
@@ -90,16 +91,23 @@ def filter_nulls(ground_truth_labels, predicted_labels):
             predicted_labels[i] = "FAIL" if ground_truth_labels[i] == "PASS" else "PASS"
     return predicted_labels, nulls
 
-def get_y_true(dataset):
+def get_y_true(dataset, output_field=OUTPUT_FIELD, pos_label=POS_LABEL):
     ground_truth_labels = []
     for example in dataset:
-        ground_truth_text = example[UNSLOTH_OUTPUT_FIELD]
-        ground_truth_label = extract_xml_answer(ground_truth_text, LABEL_OPENING, LABEL_CLOSING)
+        ground_truth_text = example[output_field]
+       
+        if not isinstance(ground_truth_text, str):
+            ground_truth_label = str(ground_truth_text)
+        elif LABEL_OPENING in ground_truth_text:
+            ground_truth_label = extract_xml_answer(ground_truth_text, LABEL_OPENING, LABEL_CLOSING)
+        else:
+            ground_truth_label = ground_truth_text.strip()
+        
         ground_truth_labels.append(ground_truth_label)
-    y_true = [1 if label == POS_LABEL else 0 for label in ground_truth_labels]
+    y_true = [1 if label == pos_label else 0 for label in ground_truth_labels]
     return y_true
 
-def get_binary_classification_report(dataset, y_prob, target_fpr=0.05):
+def get_binary_classification_report(dataset, prob_pairs, target_fpr=0.05, logit_pairs=None, output_field=OUTPUT_FIELD, pos_label=POS_LABEL):
     """
     Generates a full report for binary classification, including metrics at a target FPR.
 
@@ -113,13 +121,22 @@ def get_binary_classification_report(dataset, y_prob, target_fpr=0.05):
         dict: A dictionary containing key classification metrics, including a section for
               the best F1 score and another for the performance at the target FPR.
     """
-    y_true = get_y_true(dataset)
+    y_true = get_y_true(dataset, output_field, pos_label=pos_label)
+    y_pos_prob =  np.array([pair[0] for pair in prob_pairs])  # Assuming prob_pairs is a list of (pos_prob, neg_prob) tuples
+    y_neg_prob = np.array([pair[1] for pair in prob_pairs]) 
 
-    # --- Overall AUC ---
-    auc = roc_auc_score(y_true, y_prob)
+    # --- AUC ---
+    auc = roc_auc_score(y_true, y_pos_prob)
+
+    # --- F1 ---
+    y_pred = (y_pos_prob >= y_neg_prob).astype(int)  # Convert probabilities to binary predictions
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    fpr = fp / (fp + tn)
 
     # --- Part 1: Find metrics for the threshold that maximizes the F1 Score ---
-    precisions, recalls, pr_thresholds = precision_recall_curve(y_true, y_prob)
+    precisions, recalls, pr_thresholds = precision_recall_curve(y_true, y_pos_prob)
     pr_curve_f1_scores = (2 * precisions[:-1] * recalls[:-1]) / (precisions[:-1] + recalls[:-1])
     pr_curve_f1_scores = np.nan_to_num(pr_curve_f1_scores)
 
@@ -128,7 +145,7 @@ def get_binary_classification_report(dataset, y_prob, target_fpr=0.05):
     best_f1_score = pr_curve_f1_scores[best_f1_idx]
     recall_at_best_f1 = recalls[best_f1_idx]
 
-    y_pred_at_best_f1 = (y_prob >= best_f1_threshold).astype(int)
+    y_pred_at_best_f1 = (y_pos_prob >= best_f1_threshold).astype(int)
     try:
         tn, fp, fn, tp = confusion_matrix(y_true, y_pred_at_best_f1).ravel()
         fpr_at_best_f1 = fp / (fp + tn) if (fp + tn) > 0 else 0.0
@@ -136,7 +153,7 @@ def get_binary_classification_report(dataset, y_prob, target_fpr=0.05):
         fpr_at_best_f1 = 0.0
 
     # --- Part 2: Find metrics for the threshold that meets the target FPR ---
-    fpr_all, tpr_all, roc_thresholds = roc_curve(y_true, y_prob)
+    fpr_all, tpr_all, roc_thresholds = roc_curve(y_true, y_pos_prob)
 
     # Find the last threshold where the FPR is less than or equal to the target
     valid_fpr_indices = np.where(fpr_all <= target_fpr)[0]
@@ -151,16 +168,24 @@ def get_binary_classification_report(dataset, y_prob, target_fpr=0.05):
         recall_for_fpr = tpr_all[target_idx] # Recall is the same as TPR
 
         # Calculate precision and F1 at this specific threshold
-        y_pred_at_fpr = (y_prob >= threshold_for_fpr).astype(int)
+        y_pred_at_fpr = (y_pos_prob >= threshold_for_fpr).astype(int)
         precision_at_fpr = precision_score(y_true, y_pred_at_fpr, zero_division=0)
         
         if (precision_at_fpr + recall_for_fpr) > 0:
             f1_for_fpr = 2 * (precision_at_fpr * recall_for_fpr) / (precision_at_fpr + recall_for_fpr)
         else:
             f1_for_fpr = 0.0
+        
+    if logit_pairs is not None:
+        desired_logit_bias = get_desired_logit_bias(y_true, logit_pairs, target_fpr)
+    else:
+        desired_logit_bias = None
 
     # --- Construct the final report ---
     report = {
+        'f1': f1,
+        'recall': recall,
+        'fpr': fpr,
         'auc': auc,
         'best_f1_metrics': {
             'probability_threshold': best_f1_threshold,
@@ -170,6 +195,7 @@ def get_binary_classification_report(dataset, y_prob, target_fpr=0.05):
         },
         'target_fpr_metrics': {
             'target_fpr': target_fpr,
+            'logit_bias': desired_logit_bias,
             'probability_threshold': threshold_for_fpr,
             'f1_score': f1_for_fpr,
             'recall': recall_for_fpr,
@@ -177,11 +203,56 @@ def get_binary_classification_report(dataset, y_prob, target_fpr=0.05):
     }
     return report
 
+
+def get_desired_logit_bias(y_true, y_pred_logits, target_fpr=0.05):
+    """
+    Get the logit bias needed to get some desired False Positive Rate.
+
+    y_true : 1-D array-like of {0,1}
+        Ground-truth labels (0 = negative class, 1 = positive class).
+    y_pred_logits : array-like of shape (n_samples, 2)
+        Each row is (positive_logit, negative_logit).
+    """
+    y_true = np.asarray(y_true)
+    logits  = np.asarray(y_pred_logits, dtype=float)
+    if logits.shape[1] != 2:
+        raise ValueError("y_pred_logits must have two columns: (pos, neg).")
+    if not (0.0 <= target_fpr <= 1.0):
+        raise ValueError("target_fpr must be in the range [0, 1].")
+
+    # margins between positive and negative logits
+    # postive margin means positive class prediction, negative margin means negative class prediction
+    margins = logits[:, 0] - logits[:, 1]
+
+    # focus on the margins for negative samples
+    neg_class_margins = margins[y_true == 0]
+    if neg_class_margins.size == 0:
+        raise ValueError("No negative samples to measure FPR from.")
+
+    # Sort descending: larger margin means more confident positive prediction
+    # So this is sorted as: most confidently wrong -> least confidently wrong -> least confidently right -> most confidently right
+    # The threshold between wrong and right is wherever 0 is in the sorted margins.
+    # We want to find a bias that makes 0 be at target_fpr percent of the way through the list.
+    neg_class_margins = np.sort(neg_class_margins)[::-1]
+
+    # Find the index where we want the threshold to be.
+    k_float = target_fpr * len(neg_class_margins)
+    k = int(k_float)
+    k = np.clip(k, 1, len(neg_class_margins))         # always at least one index
+    target_margin = neg_class_margins[k - 1]          # k-th largest margin
+
+    # We want to be able to add the bias term to the target margin and make it 0
+    bias = -target_margin
+    return bias
+
 def print_formatted_report(report):
     print("--- Classification Report ---")
     print("\nOverall Performance:")
     print(f"  AUC: {report['auc']:.4f}")
-
+    print(f"  F1 Score: {report['f1']:.4f}")
+    print(f"  Recall: {report['recall']:.4f}")
+    print(f"  FPR: {report['fpr']:.4f}")
+    
     print("\nMetrics at Best F1-Score Threshold:")
     best_f1_metrics = report['best_f1_metrics']
     print(f"  Optimal Probability Threshold: {best_f1_metrics['probability_threshold']:.2e}")
@@ -192,6 +263,10 @@ def print_formatted_report(report):
     print(f"\nMetrics at {report['target_fpr_metrics']['target_fpr']:.0%} Target FPR:")
     target_fpr_metrics = report['target_fpr_metrics']
     if target_fpr_metrics['probability_threshold'] is not None:
+        if target_fpr_metrics['logit_bias'] is not None:
+            print(f"  Logit bias for Target FPR: {target_fpr_metrics['logit_bias']:.2f}")
+        else:
+            print("  Logit bias for Target FPR: Not available when run with VLLM. Run with --no-use_vllm to get logit bias from huggingface outputs.")
         print(f"  Probability Threshold for Target FPR: {target_fpr_metrics['probability_threshold']:.2e}")
         print(f"  F1 Score at Target FPR: {target_fpr_metrics['f1_score']:.2%}")
         print(f"  Recall at Target FPR: {target_fpr_metrics['recall']:.2%}")
@@ -199,36 +274,128 @@ def print_formatted_report(report):
         print("  Could not achieve the target FPR.")
     print("\n---------------------------")
 
-def get_stats(outputs, dataset, multirule=False, relaxed_parsing=False):
-    ground_truth_labels = []
-    predicted_labels = []
+
+def get_dataset_labels(dataset, custom_label_column=None, custom_pos_label=None, custom_neg_label=None, label_opening=LABEL_OPENING, label_closing=LABEL_CLOSING):
+    labels = []
+    for example in dataset:
+        if custom_label_column is None:
+            label_text = example[OUTPUT_FIELD]
+            label = extract_xml_answer(label_text, label_opening, label_closing)
+        else:
+            assert custom_pos_label is not None and custom_neg_label is not None, "If using custom_label_column, must also provide custom_pos_label and custom_neg_label."
+            label_text = example[custom_label_column]
+
+            if not isinstance(label_text, str):
+                label = str(label_text)
+            elif LABEL_OPENING in label_text:
+                label = extract_xml_answer(label_text, LABEL_OPENING, LABEL_CLOSING)
+            else:
+                label = label_text.strip()
+
+            if label == custom_pos_label:
+                label = POS_LABEL
+            elif label == custom_neg_label:
+                label = NEG_LABEL
+            else:
+                label = "null"
+        labels.append(label)
+    return labels
+
+def get_predicted_labels(outputs, start_tag=LABEL_OPENING, end_tag=LABEL_CLOSING, json_key=None):
+    predicted_labels = [map_text_to_label(output, start_tag, end_tag, json_key) for output in outputs]
+    return predicted_labels
+
+def map_text_to_label(text, start_tag=LABEL_OPENING, end_tag=LABEL_CLOSING, json_key=None):
+    """
+    Wildguard: 
+        Harmful request: yes
+        Response refusal: yes
+        Harmful response: no
+    GuardReasoner:
+        Answers: 
+        Request: harmful
+        Completion: refusal
+        Response: unharmful
+    LlamaGuard:
+        unsafe
+        S1,S6,S14
+    Nemoguard:
+        {
+            "User Safety": "unsafe",
+            "Safety Categories": "Controlled/Regulated Substances, Criminal Planning/Confessions"
+        }
+    DynaGuard:
+        <answer>PASS</answer>
+    """
+    if json_key is not None:
+        # If we are looking for a specific key in a JSON object, parse the text as JSON.
+        try:
+            json_data = json.loads(text)
+            value = json_data.get(json_key, "").strip().lower()
+        except json.JSONDecodeError:
+            return "null"
+    else:
+        if not start_tag:
+            start_pattern = '^'
+        else:
+            start_pattern = re.escape(start_tag)
+        if not end_tag:
+            end_pattern = '$'
+        elif end_tag == "\n":
+            # Let newline signify end-of-line, meaning it matches both newline or end of string.
+            end_pattern = r'(?:\n|$)'
+        else:
+            end_pattern = re.escape(end_tag)
+        # Constructs the search pattern to find content between the start and end tags. The capture group is between the parentheses.
+        text = text.strip()
+        pattern = start_pattern + '(.*?)' + end_pattern
+        match = re.search(pattern, text, re.DOTALL) # use DOTALL to have .* match newlines
+        if not match:
+            return "null"
+        # Extract the captured group and clean it up. Index 0 is the whole match, index 1 is the captured group.
+        value = match.group(1).strip().lower()
+
+    # Keywords that indicate a positive (harmful/unsafe/violation) label.
+    pos_label_keywords = ["unsafe", "harmful", "fail", "yes"]
+    if value in pos_label_keywords:
+        return POS_LABEL
+    else:
+        return NEG_LABEL
+
+def get_stats(ground_truth_labels, predicted_labels):
     false_negatives = []  
     false_positives = []  # The transcript was fine but we flagged a violation.
     true_positives = []  # Successful identification of a violation.
-    rule_violations = {"missed": 0, "extra": 0}
-    for i, (example, output_text) in enumerate(zip(dataset, outputs)):
-        ground_truth_text = example[UNSLOTH_OUTPUT_FIELD]
-        ground_truth_label = extract_xml_answer(ground_truth_text, LABEL_OPENING, LABEL_CLOSING)
-        if relaxed_parsing:
-            predicted_label = extract_answer_anywhere(output_text, POS_LABEL, NEG_LABEL)
-        else:
-            predicted_label = extract_xml_answer(output_text, LABEL_OPENING, LABEL_CLOSING)
-        # print(f'Example:\n{example}\n\nOutput:{output_text}\n\nGround Truth:{ground_truth_text}\n\n')
-        
-        # Thing for GuardReasoner
-        # if "PASS" in output_text:
-        #     predicted_label = "PASS"
-        # else:
-        #     predicted_label = "FAIL"
+    # rule_violations = {"missed": 0, "extra": 0}
+    # for i, (example, output_text) in enumerate(zip(dataset, outputs)):
+    #     if custom_label_column is None:
+    #         ground_truth_text = example[OUTPUT_FIELD]
+    #         ground_truth_label = extract_xml_answer(ground_truth_text, LABEL_OPENING, LABEL_CLOSING)
+    #     else:
+    #         assert custom_pos_label is not None and custom_neg_label is not None, "If using custom_label_column, must also provide custom_pos_label and custom_neg_label."
+    #         ground_truth_text = example[custom_label_column]
+    #         ground_truth_label = ground_truth_text.strip()
+    #         if ground_truth_label == custom_pos_label:
+    #             ground_truth_label = POS_LABEL
+    #         elif ground_truth_label == custom_neg_label:
+    #             ground_truth_label = NEG_LABEL
+    #         else:
+    #             ground_truth_label = "null"
+    #     if relaxed_parsing:
+    #         predicted_label = extract_answer_anywhere(output_text, POS_LABEL, NEG_LABEL)
+    #     else:
+    #         predicted_label = extract_xml_answer(output_text, LABEL_OPENING, LABEL_CLOSING)
 
-        ground_truth_labels.append(ground_truth_label)
-        predicted_labels.append(predicted_label)
+    #     ground_truth_labels.append(ground_truth_label)
+    #     predicted_labels.append(predicted_label)
         
-        if multirule:
-            # When it gets it right that some rules were violated, check to see if it marked the right rules.
-            if predicted_label == "FAIL" and ground_truth_label == "FAIL":
-                update_rule_violations(ground_truth_label, output_text, rule_violations)
+        # if multirule:
+        #     # When it gets it right that some rules were violated, check to see if it marked the right rules.
+        #     if predicted_label == "FAIL" and ground_truth_label == "FAIL":
+        #         update_rule_violations(ground_truth_label, output_text, rule_violations)
 
+    assert len(ground_truth_labels) == len(predicted_labels), f"Ground truth labels and predicted labels must be the same length. Got {len(ground_truth_labels)} and {len(predicted_labels)}."
+    for i, (ground_truth_label, predicted_label) in enumerate(zip(ground_truth_labels, predicted_labels)):
         if predicted_label == "PASS" and ground_truth_label == "FAIL":
             false_negatives.append(i)
         if predicted_label == "FAIL" and ground_truth_label == "PASS":
@@ -248,7 +415,6 @@ def get_stats(outputs, dataset, multirule=False, relaxed_parsing=False):
                 Something unexpected happened with the labels.
                 If ground_truth_labels are not all PASS/FAIL, then there was a mismatch between the dataset and expected xml tags.
                 If predicted_labels are not all PASS/FAIL, then something went wrong in filter_nulls().
-                Multi-rule eval: {multirule}
                 Expected xml tags: {LABEL_OPENING} {LABEL_CLOSING}
                 ground_truth_labels: {ground_truth_labels}
                 predicted_labels: {predicted_labels}
@@ -260,8 +426,6 @@ def get_stats(outputs, dataset, multirule=False, relaxed_parsing=False):
         "false_positives": false_positives,
         "false_negatives": false_negatives,
         "nulls": nulls,
-        "missed_rules": rule_violations["missed"],
-        "extra_rules": rule_violations["extra"],
         "percent_pass": percent_pass,
     }
     return stats
@@ -273,7 +437,7 @@ def confirm_model_compatibility(model_name, use_llamaguard):
         raise ComplianceProjectError(f"Gave a Llama-Guard model but didn't select llamaguard mode with --llamaguard: {model_name}")
 
 def confirm_dataset_compatibility(dataset, use_multirule):
-    output_text = dataset[0][UNSLOTH_OUTPUT_FIELD]
+    output_text = dataset[0][OUTPUT_FIELD]
     if use_multirule:
         required_tag = LABEL_OPENING
     else:
@@ -285,17 +449,26 @@ def confirm_dataset_compatibility(dataset, use_multirule):
             "\nTry looking for a dataset with 'multi_rule' in the path if you wanted multi-rule."
             )
 
-def apply_llamaguard_template(system_content, user_content):
-    # assert "rule" in system_content and "conversation" in system_content, f"Expected a llamaguard system template but got {system_content}"
-    
-    rule_idx = user_content.find(RULES_START)
-    conversation_idx = user_content.find(TRANSCRIPT_START)
+def insert_rules_and_transcript_into_sysprompt(system_prompt_template, policy=None, transcript=None, rules_and_transcript_text=None, user_tag="User", agent_tag="Agent"):
+    """
+    Take a system prompt that expects a policy and a transcript to be inserted by string formatting, and complete that formatting by extracting those components from
+    a typical DynaGuard training example that has the rules and transcript in a single string.
+    Also
+    """
+    if rules_and_transcript_text is not None:    
+        rule_idx = rules_and_transcript_text.find(RULES_START)
+        transcript_idx = rules_and_transcript_text.find(TRANSCRIPT_START)
 
-    rule = user_content[rule_idx + len(RULES_START):conversation_idx].strip()
-    conversation = user_content[conversation_idx + len(TRANSCRIPT_START):].strip()
-    conversation = conversation.replace('\'User\'', 'User').replace('\'Agent\'', 'Agent')
+        policy = rules_and_transcript_text[rule_idx + len(RULES_START):transcript_idx].strip()
+        transcript = rules_and_transcript_text[transcript_idx + len(TRANSCRIPT_START):].strip()
+        transcript = transcript.replace('\'User\'', user_tag).replace('\'Agent\'', agent_tag)
+    # Else get policy and transcript from the arguments.
 
-    return system_content.format(rule=rule, conversation=conversation)
+    try:
+        new_sys_prompt = system_prompt_template.format(policy=policy, conversation=transcript)
+    except KeyError as e:
+        raise ComplianceProjectError(f"There is a mismatch here between the system prompt template and the provided keywords. It errored on: {e}. Make sure the template has {{policy}} and {{conversation}} placeholders.")
+    return new_sys_prompt
 
 def map_nemoguard_output(string_output):
     try:
@@ -474,7 +647,7 @@ def print_stats(dataset_path, local=True, obj=False, torchtune=False):
     num_fail = 0
     
     for i, example in enumerate(dataset):
-        output_field = TORCHTUNE_OUTPUT_FIELD if torchtune else UNSLOTH_OUTPUT_FIELD
+        output_field = TORCHTUNE_OUTPUT_FIELD if torchtune else OUTPUT_FIELD
         label = extract_xml_answer(example[output_field], LABEL_OPENING, LABEL_CLOSING)
         if label == "PASS":
             num_pass += 1
@@ -1114,3 +1287,24 @@ def save_consolidated_analysis(model_name, analysis_dict, dataset_path, subset, 
         json.dump(consolidated_data, f, indent=2, cls=JsonSetEncoder)
 
     print(f"Consolidated analysis updated in {consolidated_file_path} for model: {model_name}")
+
+def get_transcript_from_safety_example(example, user_col="prompt", agent_col="response", user_tag="User", agent_tag="Agent"):
+    user_input = str(example.get(user_col, ""))
+    agent_input = str(example.get(agent_col, ""))
+    transcript = f"\n{user_tag}: {user_input}\n\n{agent_tag}: {agent_input}"
+    return transcript
+
+def format_user_agent_tags(transcript, user_tag="User:", agent_tag="Agent:"):
+    """Replace either User or 'User' and Agent or 'Agent' with the specified tags."""
+    transcript = transcript.replace("User:", user_tag).replace("Agent:", agent_tag)
+    transcript = transcript.replace("'User':", user_tag).replace("'Agent:'", agent_tag)
+
+    # Special handling for ShieldGemma, which has user_tag="<end_of_turn>\n<start_of_turn>\nHuman User:", agent_tag="<end_of_turn>\n<start_of_turn>\nAgent:"
+    # This makes it so that in multiturn everything is fine, but the first User turn has an improper <end_of_turn> tag and the last Agent turn is missing <end_of_turn>.
+    # Remove the first instance of <end_of_turn> in the transcript
+    transcript = transcript.replace("<end_of_turn>", "", 1)
+    # Add <end_of_turn> to the end of the transcript
+    if "<end_of_turn>" in transcript:
+        transcript += "\n<end_of_turn>"
+
+    return transcript
