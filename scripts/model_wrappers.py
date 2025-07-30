@@ -16,7 +16,7 @@ from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 
 
-from constants import COT_OPENING, COT_OPENING_QWEN, GUARDREASONER_COT_OPENING, GUARDREASONER_LABEL_OPENING, LABEL_OPENING, NEG_LABEL, POS_LABEL
+from constants import COT_OPENING, COT_OPENING_QWEN, GUARDREASONER_COT_OPENING, GUARDREASONER_LABEL_OPENING, LABEL_OPENING, LLAMAGUARD_LABEL_OPENING, NEG_LABEL, NEMOGUARD_LABEL_OPENING, POS_LABEL, SHIELDGEMMA_LABEL_OPENING, WILDGUARD_LABEL_OPENING
 
 import logging
 logger = logging.getLogger(__name__)
@@ -104,18 +104,40 @@ class LocalModelWrapper(ModelWrapper):
                 # Ignore enable_thinking, there is no thinking mode
                 # Also, the wildguard tokenizer has no chat template so we make our own here
                 # Also, it ignores any user_content even if it is passed in.
-                prompt = f"<s><|user|>\n[INST] {system_content} [/INST]\n<|assistant|>"
-            elif "llama-guard" in self.model_name.lower() or "nemoguard" in self.model_name.lower():
-            # elif any(s in self.model_name.lower() for s in ["llama-guard", "nemoguard"]):
+                if enable_thinking:
+                    prompt = f"<s><|user|>\n[INST] {system_content} [/INST]\n<|assistant|>"
+                else:
+                    prompt = f"<s><|user|>\n[INST] {system_content} [/INST]\n<|assistant|>{WILDGUARD_LABEL_OPENING}"
+            elif "llama-guard" in self.model_name.lower():
                 # The LlamaGuard-based models have a special chat template that is intended to take in a message-formatted list that alternates between user and assistant
                 # where "assistant" does not refer to LlamaGuard, but rather an external assistant that LlamaGuard will evaluate.
                 # This wraps the conversation in the LlamaGuard system prompt with 14 standard categories, but it doesn't allow for customization.
                 # So instead we write our own system prompt with custom categories and use the chat template tags shown here: https://www.llama.com/docs/model-cards-and-prompt-formats/llama-guard-3/
                 # Also, there is no enable_thinking option for these models, so we ignore it.
-                prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>{system_content}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+                if enable_thinking:
+                    prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>{system_content}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+                else:
+                    prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>{system_content}<|eot_id|><|start_header_id|>assistant<|end_header_id|>{LLAMAGUARD_LABEL_OPENING}"
+            elif "nemoguard" in self.model_name.lower():
+                if enable_thinking:
+                    prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>{system_content}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+                else:
+                    prompt = f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>{system_content}<|eot_id|><|start_header_id|>assistant<|end_header_id|>{NEMOGUARD_LABEL_OPENING}"
             elif "shieldgemma" in self.model_name.lower():
                 # ShieldGemma has a chat template similar to LlamaGuard where it takes in the user-assistant list, and as above, we recreate the template ourselves for greater flexibility. (Spoiler: the template is just a <bos> token.)
-                prompt = f"<bos>{system_content}"
+                if enable_thinking:
+                    prompt = f"<bos>{system_content}"
+                else:
+                    prompt = f"<bos>{system_content}{SHIELDGEMMA_LABEL_OPENING}"
+            elif "mistral" in self.model_name.lower():
+                # Mistral's chat template doesn't support using sys + user + assistant together and it silently drops the system prompt if you do that. Official Mistral behavior is to concat the sys_prompt with the first user message with two newlines.
+                if enable_thinking:
+                    assistant_content = COT_OPENING_QWEN + "\n"
+                else:
+                    assistant_content = LABEL_OPENING + "\n"
+                sys_user_combined = f"{system_content}\n\n{user_content}"
+                message = self.get_message_template(user_content=sys_user_combined, assistant_content=assistant_content)
+                prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
             # All other models
             else:
                 if enable_thinking:
@@ -134,17 +156,17 @@ class HfModelWrapper(LocalModelWrapper):
             model_name, device_map="auto", torch_dtype=torch.bfloat16
         ).eval()
     
-    def get_prediction(self, message, strict=False):
-        pos_token_id = self.tokenizer.encode(POS_LABEL, add_special_tokens=False)[0]
-        neg_token_id = self.tokenizer.encode(NEG_LABEL, add_special_tokens=False)[0]
+    def get_prediction(self, message, strict=False, pos_label=POS_LABEL, neg_label=NEG_LABEL):
+        pos_token_id = self.tokenizer.encode(pos_label, add_special_tokens=False)[0]
+        neg_token_id = self.tokenizer.encode(neg_label, add_special_tokens=False)[0]
         
         inputs = self.tokenizer(message, return_tensors="pt").to(self.model.device)
         logits = self.model(**inputs).logits
         prediction_logits = logits[0, -1, :] # Next token prediction logits are last in the sequence
-        predicted_token_id = torch.argmax(prediction_logits).item()
-        if not predicted_token_id in [pos_token_id, neg_token_id] and strict:
-            predicted_token = self.tokenizer.decode(predicted_token_id, skip_special_tokens=True)
-            raise ComplianceProjectError(f"The next token prediction was neither {POS_LABEL} nor {NEG_LABEL}. Instead it was '{predicted_token}'. Consider debugging by getting the full generation to see what is happening.")
+        # predicted_token_id = torch.argmax(prediction_logits).item()
+        # if not predicted_token_id in [pos_token_id, neg_token_id] and strict:
+        #     predicted_token = self.tokenizer.decode(predicted_token_id, skip_special_tokens=True)
+        #     raise ComplianceProjectError(f"The next token prediction was neither {pos_label} nor {neg_label}. Instead it was '{predicted_token}'. Consider debugging by getting the full generation to see what is happening.")
         
         prediction_probs = torch.nn.functional.softmax(prediction_logits, dim=-1)
         pos_prob = prediction_probs[pos_token_id].item()
@@ -153,8 +175,8 @@ class HfModelWrapper(LocalModelWrapper):
         neg_logit = prediction_logits[neg_token_id].item()
         return (pos_prob, neg_prob), (pos_logit, neg_logit)
         
-    def get_prediction_probs(self, messages, strict=False):
-        probs_logits = [self.get_prediction(message, strict) for message in tqdm(messages)]
+    def get_prediction_probs(self, messages, strict=False, pos_label=POS_LABEL, neg_label=NEG_LABEL):
+        probs_logits = [self.get_prediction(message, strict, pos_label=pos_label, neg_label=neg_label) for message in tqdm(messages)]
         prob_pairs, logit_pairs = zip(*probs_logits)
         return prob_pairs, logit_pairs
         
@@ -218,9 +240,9 @@ class VllmModelWrapper(LocalModelWrapper):
         outputs = [response.outputs[0].text for response in responses]
         return outputs
     
-    def get_prediction_probs(self, messages, strict=False):
-        pos_token_id = self.tokenizer.encode(POS_LABEL, add_special_tokens=False)[0]
-        neg_token_id = self.tokenizer.encode(NEG_LABEL, add_special_tokens=False)[0]
+    def get_prediction_probs(self, messages, strict=False, pos_label=POS_LABEL, neg_label=NEG_LABEL):
+        pos_token_id = self.tokenizer.encode(pos_label, add_special_tokens=False)[0]
+        neg_token_id = self.tokenizer.encode(neg_label, add_special_tokens=False)[0]
     
         sampling_params = SamplingParams(max_tokens=1, logprobs=20)
         # responses -> List[obj(prompt, outputs -> List[obj(text, logprobs, index, token_ids, cumulative_logprobs)])]
@@ -230,7 +252,7 @@ class VllmModelWrapper(LocalModelWrapper):
         for response in responses:
             token_logprob_dict = response.outputs[0].logprobs[0]
             if not (pos_token_id in token_logprob_dict or neg_token_id in token_logprob_dict) and strict:
-                raise ComplianceProjectError(f"The next token prediction was neither {POS_LABEL} nor {NEG_LABEL}. Instead we got '{token_logprob_dict}'. Consider debugging by getting the full generation to see what is happening.")
+                raise ComplianceProjectError(f"The next token prediction was neither {pos_label} nor {neg_label}. Instead we got '{token_logprob_dict}'. Consider debugging by getting the full generation to see what is happening.")
             pos_logprob_obj = token_logprob_dict.get(pos_token_id, None)
             neg_logprob_obj = token_logprob_dict.get(neg_token_id, None)
             if pos_logprob_obj is not None:
@@ -256,7 +278,7 @@ class VllmModelWrapper(LocalModelWrapper):
 
 
 class ApiModelWrapper(ModelWrapper):
-    def __init__(self, model_name, temperature=0.6, api_delay=None, retries=3, max_batch_size=100, max_new_tokens=1000, log_interval=100):
+    def __init__(self, model_name, temperature=0.6, api_delay=None, retries=3, max_batch_size=1000, max_new_tokens=1000, log_interval=100):
         self.model_name = f"gemini/{model_name}" if "gemini" in model_name else model_name
         self.temperature = temperature
         self.delay = api_delay if api_delay is not None else (4 if "gemini" in model_name else 0)
@@ -349,16 +371,15 @@ class ApiModelWrapper(ModelWrapper):
         return results
     
     def get_responses(self, messages, logit_bias_dict=None):
-        print("Starting to get responses for serial API calls...")
         if self.delay is None or self.delay == 0:
-            # batch_size = self.max_batch_size
-            # completed = 0
-            # outputs = []
-            # while completed < len(messages):
-            #     batch = messages[completed:completed+batch_size]
-            #     outputs += asyncio.run(self.gather_responses(batch))
-            #     completed += batch_size
-            outputs = asyncio.run(self.gather_responses(messages, logit_bias_dict))
+            batch_size = self.max_batch_size
+            completed = 0
+            outputs = []
+            while completed < len(messages):
+                batch = messages[completed:completed+batch_size]
+                outputs += asyncio.run(self.gather_responses(batch, logit_bias_dict))
+                completed += batch_size
+            # outputs = asyncio.run(self.gather_responses(messages, logit_bias_dict))
         else:
             outputs = [self.get_response(message, logit_bias_dict) for message in tqdm(messages)]
         return outputs

@@ -12,7 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
-from constants import DYNAGUARD_AGENT_TAG, DYNAGUARD_CONTENT_TEMPLATE, DYNAGUARD_USER_TAG, GUARDREASONER_AGENT_TAG, GUARDREASONER_END_TAG, GUARDREASONER_START_TAG, GUARDREASONER_TEMPLATE, GUARDREASONER_TEMPLATE_COMPLIANCE, GUARDREASONER_USER_TAG, HARM_RULE, HARM_TEMPLATE, LLAMAGUARD_AGENT_TAG, LLAMAGUARD_TEMPLATE_COMPLIANCE, LLAMAGUARD_TEMPLATE, LLAMAGUARD_USER_TAG, MULTIRULE_SYSTEM_PROMPT_V5, NEMOGUARD_AGENT_TAG, NEMOGUARD_JSON_KEY, NEMOGUARD_TEMPLATE_COMPLIANCE, NEMOGUARD_TEMPLATE, INPUT_FIELD, NEMOGUARD_USER_TAG, OUTPUT_FIELD, POS_LABEL, SHIELDGEMMA_AGENT_TAG, SHIELDGEMMA_END_TAG, SHIELDGEMMA_START_TAG, SHIELDGEMMA_TEMPLATE, SHIELDGEMMA_TEMPLATE_COMPLIANCE, SHIELDGEMMA_USER_TAG, WILDGUARD_AGENT_TAG, WILDGUARD_TEMPLATE, WILDGUARD_TEMPLATE_COMPLIANCE, WILDGUARD_USER_TAG, WILDGUARD_START_TAG, WILDGUARD_END_TAG, DYNAGUARD_START_TAG, DYNAGUARD_END_TAG, LLAMAGUARD_START_TAG, LLAMAGUARD_END_TAG, NEMOGUARD_START_TAG, NEMOGUARD_END_TAG
+from constants import DYNAGUARD_AGENT_TAG, DYNAGUARD_CONTENT_TEMPLATE, DYNAGUARD_USER_TAG, GUARDREASONER_AGENT_TAG, GUARDREASONER_END_TAG, GUARDREASONER_NEG_LABEL, GUARDREASONER_POS_LABEL, GUARDREASONER_START_TAG, GUARDREASONER_TEMPLATE, GUARDREASONER_TEMPLATE_COMPLIANCE, GUARDREASONER_USER_TAG, HARM_RULE, HARM_TEMPLATE, LLAMAGUARD_AGENT_TAG, LLAMAGUARD_NEG_LABEL, LLAMAGUARD_POS_LABEL, LLAMAGUARD_TEMPLATE_COMPLIANCE, LLAMAGUARD_TEMPLATE, LLAMAGUARD_USER_TAG, MULTIRULE_SYSTEM_PROMPT_V5, NEG_LABEL, NEMOGUARD_AGENT_TAG, NEMOGUARD_JSON_KEY, NEMOGUARD_NEG_LABEL, NEMOGUARD_POS_LABEL, NEMOGUARD_TEMPLATE_COMPLIANCE, NEMOGUARD_TEMPLATE, INPUT_FIELD, NEMOGUARD_USER_TAG, OUTPUT_FIELD, POS_LABEL, SHIELDGEMMA_AGENT_TAG, SHIELDGEMMA_END_TAG, SHIELDGEMMA_NEG_LABEL, SHIELDGEMMA_POS_LABEL, SHIELDGEMMA_START_TAG, SHIELDGEMMA_TEMPLATE, SHIELDGEMMA_TEMPLATE_COMPLIANCE, SHIELDGEMMA_USER_TAG, WILDGUARD_AGENT_TAG, WILDGUARD_NEG_LABEL, WILDGUARD_POS_LABEL, WILDGUARD_TEMPLATE, WILDGUARD_TEMPLATE_COMPLIANCE, WILDGUARD_USER_TAG, WILDGUARD_START_TAG, WILDGUARD_END_TAG, DYNAGUARD_START_TAG, DYNAGUARD_END_TAG, LLAMAGUARD_START_TAG, LLAMAGUARD_END_TAG, NEMOGUARD_START_TAG, NEMOGUARD_END_TAG
 from helpers import format_user_agent_tags, get_dataset_labels, get_predicted_labels, get_transcript_from_safety_example, insert_rules_and_transcript_into_sysprompt, configure_logging, extract_xml_answer, get_analysis, get_binary_classification_report, get_stats, confirm_dataset_compatibility, map_llamaguard_output, create_enriched_outputs, map_nemoguard_output, print_formatted_report, save_consolidated_outputs, save_consolidated_analysis
 
 from dotenv import load_dotenv, find_dotenv
@@ -95,6 +95,11 @@ def main(args):
         dataset.shuffle(seed=42)
     dataset = dataset.select(range(n))
 
+    # # Select only the first 350 and last 98 examples
+    # indices = list(range(350)) + list(range(len(dataset) - 98, len(dataset)))
+    # dataset = dataset.select(indices)
+
+
     #############
     # Model
     #############
@@ -136,7 +141,9 @@ def main(args):
     # Messages
     ###############
     print("Turning dataset into LLM message strings..")
-    is_compliance_dataset = args.subset is not None and "compliance" in args.subset #or "wildguard" in args.subset # We have a compliance-formatted version of the wildguard dataset.
+    is_compliance_dataset = (
+        (args.subset is not None and "compliance" in args.subset) or 
+        ("tomg" in args.model and args.subset == "wildguard")) # We have a compliance-formatted version of the wildguard dataset.
         
     #########
     # 1. Get the policies and transcripts
@@ -165,6 +172,8 @@ def main(args):
         agent_tag = WILDGUARD_AGENT_TAG
         label_start_tag = WILDGUARD_START_TAG
         label_end_tag = WILDGUARD_END_TAG
+        pos_label = WILDGUARD_POS_LABEL
+        neg_label = WILDGUARD_NEG_LABEL
     elif "guardreasoner" in args.model.lower():
         sys_prompt_template = GUARDREASONER_TEMPLATE_COMPLIANCE if is_compliance_dataset else GUARDREASONER_TEMPLATE
         if not args.use_cot:
@@ -175,12 +184,16 @@ def main(args):
         agent_tag = GUARDREASONER_AGENT_TAG
         label_start_tag = GUARDREASONER_START_TAG
         label_end_tag = GUARDREASONER_END_TAG
+        pos_label = GUARDREASONER_POS_LABEL
+        neg_label = GUARDREASONER_NEG_LABEL
     elif "llama-guard" in args.model.lower():
         sys_prompt_template = LLAMAGUARD_TEMPLATE_COMPLIANCE if is_compliance_dataset else LLAMAGUARD_TEMPLATE
         user_tag = LLAMAGUARD_USER_TAG
         agent_tag = LLAMAGUARD_AGENT_TAG
         label_start_tag = LLAMAGUARD_START_TAG
         label_end_tag = LLAMAGUARD_END_TAG
+        pos_label = LLAMAGUARD_POS_LABEL
+        neg_label = LLAMAGUARD_NEG_LABEL
     elif "nemoguard" in args.model.lower():
         sys_prompt_template = NEMOGUARD_TEMPLATE_COMPLIANCE if is_compliance_dataset else NEMOGUARD_TEMPLATE
         user_tag = NEMOGUARD_USER_TAG
@@ -188,18 +201,24 @@ def main(args):
         label_start_tag = NEMOGUARD_START_TAG
         label_end_tag = NEMOGUARD_END_TAG
         json_key = NEMOGUARD_JSON_KEY
+        pos_label = NEMOGUARD_POS_LABEL
+        neg_label = NEMOGUARD_NEG_LABEL
     elif "shieldgemma" in args.model.lower():
         sys_prompt_template = SHIELDGEMMA_TEMPLATE_COMPLIANCE if is_compliance_dataset else SHIELDGEMMA_TEMPLATE
         user_tag = SHIELDGEMMA_USER_TAG
         agent_tag = SHIELDGEMMA_AGENT_TAG
         label_start_tag = SHIELDGEMMA_START_TAG
         label_end_tag = SHIELDGEMMA_END_TAG
+        pos_label = SHIELDGEMMA_POS_LABEL
+        neg_label = SHIELDGEMMA_NEG_LABEL
     else:
         # No template, just a system prompt with nothing to insert and the content goes in the user field
         user_tag = DYNAGUARD_USER_TAG
         agent_tag = DYNAGUARD_AGENT_TAG
         label_start_tag = DYNAGUARD_START_TAG
         label_end_tag = DYNAGUARD_END_TAG
+        pos_label = POS_LABEL
+        neg_label = NEG_LABEL
     
     ##########
     # 3. Get messages
@@ -221,12 +240,13 @@ def main(args):
     #############
     if args.get_auc:
         print("Doing non-thinking eval including AUC and gathering logit bias suggestions...")
-        # non_cot_messages = [template_fn(sys_prompt, x[INPUT_FIELD], enable_thinking=False) for x in dataset]
-        prob_pairs, logit_pairs = model.get_prediction_probs(non_cot_messages)
+        prob_pairs, logit_pairs = model.get_prediction_probs(non_cot_messages, pos_label=pos_label, neg_label=neg_label)
         report = get_binary_classification_report(dataset, prob_pairs, args.target_fpr, logit_pairs, 
                                                   output_field=args.label_col if args.label_col else OUTPUT_FIELD,
-                                                  pos_label=args.pos_label if args.pos_label else POS_LABEL)
-        print_formatted_report(report)
+                                                  pos_label=args.pos_label if args.pos_label else POS_LABEL)        
+        pos_token_id = model.tokenizer.encode(pos_label, add_special_tokens=False)[0]
+        neg_token_id = model.tokenizer.encode(neg_label, add_special_tokens=False)[0]
+        print_formatted_report(report, pos_token_id, neg_token_id)
     # EARLY EXIT FROM EVALUATION
     if args.auc_only:
         return
@@ -246,16 +266,12 @@ def main(args):
     false_negative_examples = []
     missing_label_examples = []
     for i in range(args.sample_size):
-        print("Getting ready to get outputs...")
         outputs = model.get_responses(messages, logit_bias_dict=args.logit_bias_dict)
         
         print(f"Round {i + 1} outputs complete. Now getting stats...")
         ground_truth_labels = get_dataset_labels(dataset, custom_label_column=args.label_col, custom_pos_label=args.pos_label, custom_neg_label=args.neg_label)
-        print("Ground truth labels complete.")
         predicted_labels = get_predicted_labels(outputs, start_tag=label_start_tag, end_tag=label_end_tag, json_key=json_key)
-        print("Predicted labels complete.")
         stats = get_stats(ground_truth_labels, predicted_labels)
-        print(f"Stats complete.")
         auc = report.get("auc", None) if args.get_auc else None
         f1_non_cot = report.get("f1", None) if args.get_auc else None
         recall_non_cot = report.get("recall", None) if args.get_auc else None
@@ -285,6 +301,9 @@ def main(args):
     ##################
     print("Example input:", json.dumps(messages[0], indent=4))
     print("Example output:", json.dumps(outputs[0], indent=4))
+    # for output in outputs:
+    #     if len(output) > 11:
+    #         print("Long ouput:", json.dumps(output, indent=4))
     if missing_label_examples:
         print("Missing label example:", json.dumps(outputs[missing_label_examples[0]], indent=4))
     print(f"Raw accuracy per sample: {accuracies}")
