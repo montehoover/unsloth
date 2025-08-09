@@ -95,10 +95,6 @@ def main(args):
         dataset.shuffle(seed=42)
     dataset = dataset.select(range(n))
 
-    # # Select only the first 350 and last 98 examples
-    # indices = list(range(350)) + list(range(len(dataset) - 98, len(dataset)))
-    # dataset = dataset.select(indices)
-
 
     #############
     # Model

@@ -256,16 +256,16 @@ def print_formatted_report(report, pos_token_id=None, neg_token_id=None):
     print("--- Classification Report ---")
     print("\nOverall Performance:")
     print(f"  AUC: {report['auc']:.4f}")
-    print(f"  F1 Score: {report['f1']:.4f}")
-    print(f"  Recall: {report['recall']:.4f}")
-    print(f"  FPR: {report['fpr']:.4f}")
+    print(f"  F1 Score: {report['f1']:.2%}")
+    print(f"  Recall: {report['recall']:.2%}")
+    print(f"  FPR: {report['fpr']:.2%}")
     
     print("\nMetrics at Best F1-Score Threshold:")
     best_f1_metrics = report['best_f1_metrics']
     if best_f1_metrics['logit_bias'] is not None:
         bias = best_f1_metrics['logit_bias']
         bias_dict = {str(pos_token_id): bias/2, str(neg_token_id): -bias/2}
-        print(f"  Logit Bias Dict for Best F1: {bias_dict}")
+        print(f"  Logit Bias Dict for Best F1: {json.dumps(bias_dict)}")
     else:
         print("  Logit Bias for Best F1: Not available when run with VLLM. Run with --no-use_vllm to get logit bias from huggingface outputs.")
     print(f"  Optimal Probability Threshold: {best_f1_metrics['probability_threshold']:.2e}")
@@ -279,7 +279,7 @@ def print_formatted_report(report, pos_token_id=None, neg_token_id=None):
         if target_fpr_metrics['logit_bias'] is not None:
             bias = target_fpr_metrics['logit_bias']
             bias_dict = {str(pos_token_id): bias/2, str(neg_token_id): -bias/2}
-            print(f"  Logit Bias Dict for Best F1: {bias_dict}")
+            print(f"  Logit Bias Dict for Best F1: {json.dumps(bias_dict)}")
         else:
             print("  Logit Bias for Target FPR: Not available when run with VLLM. Run with --no-use_vllm to get logit bias from huggingface outputs.")
         print(f"  Probability Threshold for Target FPR: {target_fpr_metrics['probability_threshold']:.2e}")

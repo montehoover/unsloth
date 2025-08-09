@@ -78,7 +78,16 @@ class LocalModelWrapper(ModelWrapper):
             # This works for both Qwen3 and non-Qwen3 models, and any time assistant_content is provided, it automatically adds the <think></think> pair before the content like we want for Qwen3 models.
             assert "wildguard" not in self.model_name.lower(), f"Gave assistant_content of {assistant_content} to model {self.model_name} but this type of model can only take a system prompt and that is it."
             message = self.get_message_template(system_content, user_content, assistant_content)
-            prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
+            try:
+                prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=True)
+            except ValueError as e:
+                if "continue_final_message is set" in str(e):
+                    # I got this error with the Qwen3 model - not sure why. We pass in [{system stuff}, {user stuff}, {assistant stuff}] and it does the right thing if continue_final_message=False but not if True.
+                    prompt = self.tokenizer.apply_chat_template(message, tokenize=False, continue_final_message=False)
+                    if "<|im_end|>\n" in prompt[-11:]:
+                        prompt = prompt[:-11]
+                else:
+                    raise ComplianceProjectError(f"Error applying chat template: {e}")
         else:
             # Handle the peculiarities of different models first, then handle thinking/non-thinking for all other types of models
             # All Safety models except GuardReasoner are non-thinking - there should be no option to "enable thinking"
@@ -217,15 +226,9 @@ class VllmModelWrapper(LocalModelWrapper):
     def __init__(self, model_name, temperature=0.6, top_k=20, top_p=0.95, min_p=0, max_new_tokens=1000, max_model_len=8192, custom_name=None):
         from vllm import LLM, SamplingParams
         super().__init__(model_name, temperature, top_k, top_p, min_p, max_new_tokens, custom_name)
-        self.model = LLM(model=model_name, max_model_len=max_model_len, gpu_memory_utilization=0.9)
+        self.model = LLM(model=model_name, max_model_len=max_model_len, gpu_memory_utilization=0.35)
 
     def get_responses(self, messages, temperature=None, top_k=None, top_p=None, logit_bias_dict=None):
-        if logit_bias_dict is not None:
-            token = list(logit_bias_dict.keys())[0]
-            bias = float(logit_bias_dict[token])
-            token_ids = self.tokenizer.encode(token, add_special_tokens=False)
-            logit_bias_dict = {token_id: bias for token_id in token_ids}
-
         sampling_params = SamplingParams(
             max_tokens=self.max_new_tokens,
             temperature=temperature or self.temperature,
