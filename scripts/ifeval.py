@@ -116,11 +116,16 @@ def main(args):
 
         return # Early exit if not guarding
 
-
-    if args.use_vllm:
-        guard = VllmModelWrapper(args.guard, temperature=temperature, top_k=top_k, top_p=top_p, max_new_tokens=args.max_new_tokens, max_model_len=args.max_model_len) 
+    # Get guard model
+    if "nemoguard" in args.guard.lower():
+        model_path = get_hf_model("meta-llama/Meta-Llama-3.1-8B-Instruct", args.guard)
+        custom_name = args.guard
     else:
-        guard = HfModelWrapper(args.guard, temperature=temperature, top_k=top_k, top_p=top_p, max_new_tokens=args.max_new_tokens, custom_name=custom_name)
+        model_path = args.guard
+    if args.use_vllm:
+        guard = VllmModelWrapper(model_path, temperature=temperature, top_k=top_k, top_p=top_p, max_new_tokens=args.max_new_tokens, max_model_len=args.max_model_len, custom_name=custom_name)
+    else:
+        guard = HfModelWrapper(model_path, temperature=temperature, top_k=top_k, top_p=top_p, max_new_tokens=args.max_new_tokens, custom_name=custom_name)
 
     #########
     # 1. Get the policies and transcripts
@@ -135,7 +140,7 @@ def main(args):
     # 2. Get sys prompt templates and user/agent tags
     ########
     json_key = None
-    if "wildguard" in args.model.lower():
+    if "wildguard" in args.guard.lower():
         sys_prompt_template = WILDGUARD_TEMPLATE_COMPLIANCE 
         user_tag = WILDGUARD_USER_TAG
         agent_tag = WILDGUARD_AGENT_TAG
@@ -143,7 +148,7 @@ def main(args):
         label_end_tag = WILDGUARD_END_TAG
         pos_label = WILDGUARD_POS_LABEL
         neg_label = WILDGUARD_NEG_LABEL
-    elif "guardreasoner" in args.model.lower():
+    elif "guardreasoner" in args.guard.lower():
         sys_prompt_template = GUARDREASONER_TEMPLATE_COMPLIANCE 
         if not args.use_cot:
             sys_prompt_template = sys_prompt_template.replace(
@@ -155,7 +160,7 @@ def main(args):
         label_end_tag = GUARDREASONER_END_TAG
         pos_label = GUARDREASONER_POS_LABEL
         neg_label = GUARDREASONER_NEG_LABEL
-    elif "llama-guard" in args.model.lower():
+    elif "llama-guard" in args.guard.lower():
         sys_prompt_template = LLAMAGUARD_TEMPLATE_COMPLIANCE 
         user_tag = LLAMAGUARD_USER_TAG
         agent_tag = LLAMAGUARD_AGENT_TAG
@@ -163,7 +168,7 @@ def main(args):
         label_end_tag = LLAMAGUARD_END_TAG
         pos_label = LLAMAGUARD_POS_LABEL
         neg_label = LLAMAGUARD_NEG_LABEL
-    elif "nemoguard" in args.model.lower():
+    elif "nemoguard" in args.guard.lower():
         sys_prompt_template = NEMOGUARD_TEMPLATE_COMPLIANCE 
         user_tag = NEMOGUARD_USER_TAG
         agent_tag = NEMOGUARD_AGENT_TAG
@@ -172,7 +177,7 @@ def main(args):
         json_key = NEMOGUARD_JSON_KEY
         pos_label = NEMOGUARD_POS_LABEL
         neg_label = NEMOGUARD_NEG_LABEL
-    elif "shieldgemma" in args.model.lower():
+    elif "shieldgemma" in args.guard.lower():
         sys_prompt_template = SHIELDGEMMA_TEMPLATE_COMPLIANCE 
         user_tag = SHIELDGEMMA_USER_TAG
         agent_tag = SHIELDGEMMA_AGENT_TAG
@@ -225,6 +230,7 @@ def main(args):
     for i in pos_indices:
         explanation = extract_xml_answer(guard_explanations[i], opening_tag="<explanation>", closing_tag="</explanation>")
         explanations[i] = explanation
+    print(f"Example explanation: {explanations[pos_indices[0]] if pos_indices else 'No explanations found'}")
 
     ########
     # First round fix outputs
@@ -287,6 +293,8 @@ def main(args):
         for i in pos_indices:
             explanation = extract_xml_answer(guard_explanations[i], opening_tag="<explanation>", closing_tag="</explanation>")
             explanations[i] = explanation
+        print(f"Example explanation: {explanations[pos_indices[0]] if pos_indices else 'No explanations found'}")
+
 
         # Main model stuff
         messages = []
@@ -329,6 +337,13 @@ def main(args):
         "--output_dir=ifeval/results/"
     ]
     subprocess.run(cli_command, check=True)
+
+
+    if args.lora_path or "nemoguard" in args.model.lower():
+        # Clean up temp files
+        shutil.rmtree(TEMP_PATH, ignore_errors=True)
+        print(f"Temp files removed from {TEMP_PATH}")
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert model to HuggingFace format")

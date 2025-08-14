@@ -235,11 +235,20 @@ def main(args):
     # Special non-thinking + logit bias section
     #############
     if args.get_auc:
+        if args.cot_auc:
+            preliminary_outputs = model.get_responses(messages, logit_bias_dict=args.logit_bias_dict)
+            messages_plus_outputs = [message + preliminary_output for message, preliminary_output in zip(messages, preliminary_outputs)]
+            non_cot_messages = [
+                message[: message.rfind(label_start_tag) + len(label_start_tag)]
+                if label_start_tag in message else message
+                for message in messages_plus_outputs
+            ]
+            print(f"Example non-COT message for AUC: {non_cot_messages[0]}")
         print("Doing non-thinking eval including AUC and gathering logit bias suggestions...")
         prob_pairs, logit_pairs = model.get_prediction_probs(non_cot_messages, pos_label=pos_label, neg_label=neg_label)
-        report = get_binary_classification_report(dataset, prob_pairs, args.target_fpr, logit_pairs, 
+        report, fpr, tpr = get_binary_classification_report(dataset, prob_pairs, args.target_fpr, logit_pairs, 
                                                   output_field=args.label_col if args.label_col else OUTPUT_FIELD,
-                                                  pos_label=args.pos_label if args.pos_label else POS_LABEL)        
+                                                  pos_label=args.pos_label if args.pos_label else POS_LABEL)
         pos_token_id = model.tokenizer.encode(pos_label, add_special_tokens=False)[0]
         neg_token_id = model.tokenizer.encode(neg_label, add_special_tokens=False)[0]
         print_formatted_report(report, pos_token_id, neg_token_id)
@@ -350,6 +359,13 @@ def main(args):
         output_text_data = [{"output": output, "metadata": dataset[i]} for i, output in enumerate(outputs)]
     datasets.Dataset.from_list(output_text_data).to_json(f"{output_path}/outputs.jsonl")
     print(f"Outputs saved to {output_path}/outputs.jsonl")
+    if args.get_auc:
+        # Save fpr/tpr to csv file
+        with open(f"{output_path}/roc_data.csv", "w", newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["fpr", "tpr"])
+            for fpr_val, tpr_val in zip(fpr, tpr):
+                writer.writerow([fpr_val, tpr_val])
 
     # Append results to csv
     # if os.path.exists("log/summary.csv"):
@@ -445,6 +461,7 @@ def parse_args():
     parser.add_argument("--logit_bias_dict", default=None, type=json.loads, help="Logit bias dictionary for the model. Should be a dict with token ids as keys and bias values as values. If not provided, no logit bias is applied.")
     parser.add_argument("--eval_with_target_fpr", default=False, action=argparse.BooleanOptionalAction, help="Run once to collect the logit bias required to achieve the target FPR. Then run again with this logit bias to get the final F1 score.")
     parser.add_argument("--auc_only", default=False, action=argparse.BooleanOptionalAction, help="Run only the AUC calculation and not the full evaluation. Useful for debugging logit bias.")
+    parser.add_argument("--cot_auc", default=False, action=argparse.BooleanOptionalAction, help="Use COT for AUC calculation. If not set, uses non-COT messages for AUC calculation.")
     parser.add_argument("--label_col", default=None, type=str, help="Custom label column to use for evaluation. If not provided, uses the default label column.")
     parser.add_argument("--pos_label", default=None, type=str, help="Custom positive label to use for evaluation. If not provided, uses the default positive label.")
     parser.add_argument("--neg_label", default=None, type=str, help="Custom negative label to use for evaluation. If not provided, uses the default negative label.")

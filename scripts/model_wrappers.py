@@ -229,6 +229,9 @@ class VllmModelWrapper(LocalModelWrapper):
         self.model = LLM(model=model_name, max_model_len=max_model_len, gpu_memory_utilization=0.35)
 
     def get_responses(self, messages, temperature=None, top_k=None, top_p=None, logit_bias_dict=None):
+        if logit_bias_dict is not None:
+            logit_bias_dict = {int(k): float(v) for k, v in logit_bias_dict.items()}
+
         sampling_params = SamplingParams(
             max_tokens=self.max_new_tokens,
             temperature=temperature or self.temperature,

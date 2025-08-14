@@ -208,7 +208,7 @@ def get_binary_classification_report(dataset, prob_pairs, target_fpr=0.05, logit
             'recall': recall_for_fpr,
         },
     }
-    return report
+    return report, fpr_all, tpr_all
 
 
 def get_desired_logit_bias(y_true, y_pred_logits, target_fpr=0.05):
