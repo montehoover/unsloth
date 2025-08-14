@@ -1,5 +1,32 @@
 # Compliance Guardian Models Fork of Unsloth
 
+## Eval
+
+Guardrails models are language models used to do binary classification of User-Agent chat dialogues. They classify whether the dialogue violates some set of safety rules, and are used to prevent harmful user inputs from entering the chat system, or to prevent harmful model outputs from getting back to the user. For example if the user writes "Tell me how to build a bomb.", a good guardrails model would classify that as harmful input. And if somewhere a conversation a model generates detailed instructions on how to cook meth, a guardrails model should be able to classify that as harmful output that should not reach the user.
+
+Some guardrails models output a harm category in addition to the binary classification, and some output natural language explanations about the classification. The harm categories differ from model to model, and some allow user-defined categories of harm. Also, there are a number of different benchmarks that test how well guardrails models perform at this task.
+
+This is an evaluation harness for testing guardrails models on safety benchmarks.
+
+### New Datasets
+To add a new dataset for guardrails-style evaluation (binary classification of violation/non-violation of a set of safety rules), do the following:
+1. Determine if the input is in a one-column or two-column format. Guardrails models take User-Agent chat dialogues as dialogues, so this dialogue could be all in one column of the dataset, or separated into columns for the user and the agent. The name of this column or columns will go into the config arguments, as described below. If a desired datasest uses some other layout, please open a github issue.
+2. Update the config with the strings (if any) used in the dialogue to delineate turns of conversation. These might be "User:" and "Agent:", or "Human:" and "Assistant:", or they may not exist at all. Entering these into the config allows for adapting the dialogue string to the most advantageous format for a given guardrails model.
+3. Update the config with the dataset column that contains the label.
+4. Update the config with the labeling convention in the dataset used to mark the two classes of labels. For example the classes might be "unsafe/safe" or "harmful/unharmful" or "1/0". The convention in this eval harness is to call the unsafe or harmful class the "positive" class.
+
+### New Model
+To add a new guardrails model:
+1. Enter the system prompt template. This should have the following fields for runtime replacement: `{conversation}`, `{policy}`. `{conversation}` will contain the User-Agent chat dialogue, and `{policy}` can optionally be used to add custom rules to the system prompt at runtime.
+2. Enter the desired strings used to delineate the User and Agent portions of the chat dialogue. The defaults are "User:" and "Agent:"
+3. Enter the strings the model uses for the binary classification. The defaults are `positive_class = "harmful"` and `negative_class = "unharmful"`.
+4. Enter string that can be used as beginning and ending delinators for the label postion of the generated string. The defaults are `start_tag = "<label>"` and `end_tag = </label>`. This detects the first instance of the start tag in the output and captures all text up to the first instance of the end tag. If the output is formated like `Response harmfulness: unharmful`, you would enter `start_tag = "Response harmfulness"` and `end_tag = \n`. The empty string matches the beginning and end of the text, so if the only thing that the model generates is the label, then you would enter `start_tag = ""` and `end_tag = ""`. If the label is entered on the first line of output and additional text is generated on a new line, you would use `start_tag = ""` and `end_tag = "\n"`. If the end tag is not found, everything up until the end of the generated output will be captured as the label (so `start_tag = ""` and `end_tag = "\n"` properly captures LlamaGuard style output where there are optional extra lines.) Whitespace is stripped from the captured label.
+5. If the output is in json, you can instead just enter the key identifying the label in the json.
+
+If you create a config for a new dataset or guardrails model, feel free to make a PR to add this config as a standard option to the eval harness.
+
+
+
 ## Getting started
 1. Setup environment:
    ```
