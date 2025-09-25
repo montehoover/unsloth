@@ -223,6 +223,9 @@ def main(args):
 
     predicted_labels = get_predicted_labels(guard_outputs, start_tag=label_start_tag, end_tag=label_end_tag, json_key=json_key) # predicted labels are in the form of POS_LABEL or NEG_LABEL, or "null" if not found
     pos_indices = [i for i, label in enumerate(predicted_labels) if label == POS_LABEL]
+    os.makedirs(f"ifeval/results/{args.guard}/", exist_ok=True)
+    with open(f"ifeval/results/{args.guard}/pos_indices.json", "w") as f:
+        json.dump(pos_indices, f)
     print(f"Num pos: {len(pos_indices)}, num neg: {predicted_labels.count(NEG_LABEL)}, num null: {predicted_labels.count('null')}")
     print(f"Found {len(pos_indices)} violations out of {len(predicted_labels)} examples.")
     
@@ -334,7 +337,7 @@ def main(args):
         "python", "-m", "ifeval.cli",
         "--input_data=ifeval/input_data_hf.jsonl",
         f"--input_response_data={args.output_guard}",
-        "--output_dir=ifeval/results/"
+        f"--output_dir=ifeval/results/{args.guard}/"
     ]
     subprocess.run(cli_command, check=True)
 

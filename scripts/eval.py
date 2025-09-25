@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from model_wrappers import HfModelWrapper, VllmModelWrapper, ApiModelWrapper, BatchApiModelWrapper
 from constants import DYNAGUARD_AGENT_TAG, DYNAGUARD_CONTENT_TEMPLATE, DYNAGUARD_USER_TAG, GUARDREASONER_AGENT_TAG, GUARDREASONER_END_TAG, GUARDREASONER_NEG_LABEL, GUARDREASONER_POS_LABEL, GUARDREASONER_START_TAG, GUARDREASONER_TEMPLATE, GUARDREASONER_TEMPLATE_COMPLIANCE, GUARDREASONER_USER_TAG, HARM_RULE, HARM_TEMPLATE, LLAMAGUARD_AGENT_TAG, LLAMAGUARD_NEG_LABEL, LLAMAGUARD_POS_LABEL, LLAMAGUARD_TEMPLATE_COMPLIANCE, LLAMAGUARD_TEMPLATE, LLAMAGUARD_USER_TAG, MULTIRULE_SYSTEM_PROMPT_V5, NEG_LABEL, NEMOGUARD_AGENT_TAG, NEMOGUARD_JSON_KEY, NEMOGUARD_NEG_LABEL, NEMOGUARD_POS_LABEL, NEMOGUARD_TEMPLATE_COMPLIANCE, NEMOGUARD_TEMPLATE, INPUT_FIELD, NEMOGUARD_USER_TAG, OUTPUT_FIELD, POS_LABEL, SHIELDGEMMA_AGENT_TAG, SHIELDGEMMA_END_TAG, SHIELDGEMMA_NEG_LABEL, SHIELDGEMMA_POS_LABEL, SHIELDGEMMA_START_TAG, SHIELDGEMMA_TEMPLATE, SHIELDGEMMA_TEMPLATE_COMPLIANCE, SHIELDGEMMA_USER_TAG, WILDGUARD_AGENT_TAG, WILDGUARD_NEG_LABEL, WILDGUARD_POS_LABEL, WILDGUARD_TEMPLATE, WILDGUARD_TEMPLATE_COMPLIANCE, WILDGUARD_USER_TAG, WILDGUARD_START_TAG, WILDGUARD_END_TAG, DYNAGUARD_START_TAG, DYNAGUARD_END_TAG, LLAMAGUARD_START_TAG, LLAMAGUARD_END_TAG, NEMOGUARD_START_TAG, NEMOGUARD_END_TAG
-from helpers import format_user_agent_tags, get_dataset_labels, get_predicted_labels, get_transcript_from_safety_example, insert_rules_and_transcript_into_sysprompt, configure_logging, extract_xml_answer, get_analysis, get_binary_classification_report, get_stats, confirm_dataset_compatibility, map_llamaguard_output, create_enriched_outputs, map_nemoguard_output, print_formatted_report, save_consolidated_outputs, save_consolidated_analysis
+from helpers import average_analysis_dicts, format_user_agent_tags, get_dataset_labels, get_predicted_labels, get_transcript_from_safety_example, insert_rules_and_transcript_into_sysprompt, configure_logging, extract_xml_answer, get_analysis, get_binary_classification_report, get_stats, confirm_dataset_compatibility, map_llamaguard_output, create_enriched_outputs, map_nemoguard_output, print_formatted_report, save_consolidated_outputs, save_consolidated_analysis, save_topk_chart
 
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
@@ -101,7 +101,7 @@ def main(args):
     #############
     print("Loading model:", args.model)
     custom_name = None
-    if "qwen3" in args.model.lower():
+    if "qwen3" in args.model.lower() or "dynaguard" in args.model.lower():
         if args.use_cot:
             temperature = 0.6
             top_p = 0.95
@@ -138,7 +138,8 @@ def main(args):
     ###############
     print("Turning dataset into LLM message strings..")
     is_compliance_dataset = (
-        (args.subset is not None and "compliance" in args.subset) or 
+        (args.subset is not None and "compliance" in args.subset) or
+        ("DynaBench" in args.dataset_path) or
         ("tomg" in args.model and args.subset == "wildguard")) # We have a compliance-formatted version of the wildguard dataset.
         
     #########
@@ -146,8 +147,10 @@ def main(args):
     #########
     if is_compliance_dataset:
         # DynaGuard dataset:
-        transcripts = [extract_xml_answer(x[INPUT_FIELD], "<transcript>", "</transcript>") for x in dataset]
-        policies = [extract_xml_answer(x[INPUT_FIELD], "<rules>", "</rules>") for x in dataset]
+        # transcripts = [extract_xml_answer(x[INPUT_FIELD], "<transcript>", "</transcript>") for x in dataset]
+        # policies = [extract_xml_answer(x[INPUT_FIELD], "<rules>", "</rules>") for x in dataset]
+        transcripts = [x["transcript"] for x in dataset]
+        policies = [x["policy"] for x in dataset]
 
     else:
         # Safety dataset:
@@ -245,7 +248,7 @@ def main(args):
             ]
             print(f"Example non-COT message for AUC: {non_cot_messages[0]}")
         print("Doing non-thinking eval including AUC and gathering logit bias suggestions...")
-        prob_pairs, logit_pairs = model.get_prediction_probs(non_cot_messages, pos_label=pos_label, neg_label=neg_label)
+        prob_pairs, logit_pairs, topk_probs_list = model.get_prediction_probs(non_cot_messages, pos_label=pos_label, neg_label=neg_label)
         report, fpr, tpr = get_binary_classification_report(dataset, prob_pairs, args.target_fpr, logit_pairs, 
                                                   output_field=args.label_col if args.label_col else OUTPUT_FIELD,
                                                   pos_label=args.pos_label if args.pos_label else POS_LABEL)
@@ -270,8 +273,12 @@ def main(args):
     false_positive_examples = []
     false_negative_examples = []
     missing_label_examples = []
+    wrong_predictions_multi = []
     for i in range(args.sample_size):
         outputs = model.get_responses(messages, logit_bias_dict=args.logit_bias_dict)
+        # print(f"Rules: {policies[4]}")
+        # print(f"Transcript: {transcripts[4]}")
+        # print(f"Output: {outputs[4]}")
         
         print(f"Round {i + 1} outputs complete. Now getting stats...")
         ground_truth_labels = get_dataset_labels(dataset, custom_label_column=args.label_col, custom_pos_label=args.pos_label, custom_neg_label=args.neg_label)
@@ -292,13 +299,12 @@ def main(args):
         missing_labels += len(stats["nulls"])
 
         if args.collect_all:
-            false_positive_examples.extend(stats["false_positives"])
-            false_negative_examples.extend(stats["false_negatives"])
-            missing_label_examples.extend(stats["nulls"])
-        else: # collect last run only
-            false_positive_examples = stats["false_positives"]
-            false_negative_examples = stats["false_negatives"]
-            missing_label_examples = stats["nulls"]
+            wrong_predictions_multi.append(stats["false_positives"] + stats["false_negatives"])
+
+        # collect last run only
+        false_positive_examples = stats["false_positives"]
+        false_negative_examples = stats["false_negatives"]
+        missing_label_examples = stats["nulls"]
         
 
     ##################
@@ -366,6 +372,10 @@ def main(args):
             writer.writerow(["fpr", "tpr"])
             for fpr_val, tpr_val in zip(fpr, tpr):
                 writer.writerow([fpr_val, tpr_val])
+        if args.save_plots:
+            # Save plot of topk probs to png
+            for i, probs in enumerate(topk_probs_list):
+                save_topk_chart(probs, filename=f"{output_path}/topk_probs_{i}.png")
 
     # Append results to csv
     # if os.path.exists("log/summary.csv"):
@@ -394,8 +404,14 @@ def main(args):
 
     # Do analysis over length of dialogues and length of rules and stuff
     if args.handcrafted_analysis:
-        wrong_predictions = false_positive_examples + false_negative_examples
-        analysis_dict = get_analysis(dataset, wrong_predictions, strict=args.strict_metadata)
+        if args.collect_all:
+            all_dicts = []
+            for wrong_predictions in wrong_predictions_multi:
+                all_dicts.append(get_analysis(dataset, wrong_predictions, strict=args.strict_metadata))
+            analysis_dict = average_analysis_dicts(all_dicts)
+        else:
+            wrong_predictions = false_positive_examples + false_negative_examples
+            analysis_dict = get_analysis(dataset, wrong_predictions, strict=args.strict_metadata)
         
         # Save consolidated analysis for cross-model comparison
         save_consolidated_analysis(
@@ -456,6 +472,7 @@ def parse_args():
     parser.add_argument("--strict_metadata", default=False, action=argparse.BooleanOptionalAction, help="Fail fast with detailed error if metadata is missing instead of skipping examples")
     parser.add_argument("--collect_all", default=False, action=argparse.BooleanOptionalAction, help="Collect all outputs from multiple runs")
     parser.add_argument("--enriched_outputs", default=False, action=argparse.BooleanOptionalAction, help="Enrich outputs with metadata and save to disk")
+    parser.add_argument("--save_plots", default=False, action=argparse.BooleanOptionalAction, help="Save plots of topk probabilities")
     parser.add_argument("--get_auc", default=True, action=argparse.BooleanOptionalAction, help="Calculate AUC for the model")
     parser.add_argument("--target_fpr", default=0.05, type=float, help="Target false positive rate for AUC calculation")
     parser.add_argument("--logit_bias_dict", default=None, type=json.loads, help="Logit bias dictionary for the model. Should be a dict with token ids as keys and bias values as values. If not provided, no logit bias is applied.")

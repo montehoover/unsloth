@@ -92,7 +92,7 @@ class LocalModelWrapper(ModelWrapper):
             # Handle the peculiarities of different models first, then handle thinking/non-thinking for all other types of models
             # All Safety models except GuardReasoner are non-thinking - there should be no option to "enable thinking"
             # For GuardReasoner, we should have both thinking and non-thinking modes, but the thinking mode has a special opening tag
-            if "qwen3" in self.model_name.lower():
+            if "qwen3" in self.model_name.lower() or "dynaguard" in self.model_name.lower():
                 if enable_thinking:
                     # Let the Qwen chat template handle the thinking token
                     message = self.get_message_template(system_content, user_content)
@@ -226,7 +226,7 @@ class VllmModelWrapper(LocalModelWrapper):
     def __init__(self, model_name, temperature=0.6, top_k=20, top_p=0.95, min_p=0, max_new_tokens=1000, max_model_len=8192, custom_name=None):
         from vllm import LLM, SamplingParams
         super().__init__(model_name, temperature, top_k, top_p, min_p, max_new_tokens, custom_name)
-        self.model = LLM(model=model_name, max_model_len=max_model_len, gpu_memory_utilization=0.35)
+        self.model = LLM(model=model_name, max_model_len=max_model_len, gpu_memory_utilization=0.6)
 
     def get_responses(self, messages, temperature=None, top_k=None, top_p=None, logit_bias_dict=None):
         if logit_bias_dict is not None:
@@ -246,34 +246,56 @@ class VllmModelWrapper(LocalModelWrapper):
         outputs = [response.outputs[0].text for response in responses]
         return outputs
     
-    def get_prediction_probs(self, messages, strict=False, pos_label=POS_LABEL, neg_label=NEG_LABEL):
+    def get_prediction_probs(self, messages, strict=False, pos_label=POS_LABEL, neg_label=NEG_LABEL, k=4):
         pos_token_id = self.tokenizer.encode(pos_label, add_special_tokens=False)[0]
         neg_token_id = self.tokenizer.encode(neg_label, add_special_tokens=False)[0]
-    
-        sampling_params = SamplingParams(max_tokens=1, logprobs=20)
+
+        sampling_params = SamplingParams(max_tokens=1, logprobs=k)
         # responses -> List[obj(prompt, outputs -> List[obj(text, logprobs, index, token_ids, cumulative_logprobs)])]
-        # loggprobs -> List[{token_id: obj(logprob, rank, decoded_token)}]
+        # logprobs -> List[{token_id: obj(logprob, rank, decoded_token)}]
         responses = self.model.generate(messages, sampling_params=sampling_params)
         prob_pairs = []
+        topk_token_probs_list = []
+
         for response in responses:
             token_logprob_dict = response.outputs[0].logprobs[0]
+
             if not (pos_token_id in token_logprob_dict or neg_token_id in token_logprob_dict) and strict:
-                raise ComplianceProjectError(f"The next token prediction was neither {pos_label} nor {neg_label}. Instead we got '{token_logprob_dict}'. Consider debugging by getting the full generation to see what is happening.")
+                raise ComplianceProjectError(
+                    f"The next token prediction was neither {pos_label} nor {neg_label}. "
+                    f"Instead we got '{token_logprob_dict}'. Consider debugging by getting the full generation to see what is happening."
+                )
+
             pos_logprob_obj = token_logprob_dict.get(pos_token_id, None)
             neg_logprob_obj = token_logprob_dict.get(neg_token_id, None)
+
             if pos_logprob_obj is not None:
                 logprob = pos_logprob_obj.logprob
             else:
                 logprob = -100
+
             if neg_logprob_obj is not None:
                 neg_logprob = neg_logprob_obj.logprob
             else:
                 neg_logprob = -100
+
             pos_token_prob = self._logprob_to_prob(logprob)
             neg_token_prob = self._logprob_to_prob(neg_logprob)
             prob_pairs.append((pos_token_prob, neg_token_prob))
+
+            # Format top-k token probabilities as a Python list
+            topk_tokens = [
+                {
+                    "token": v.decoded_token,
+                    "token_id": tid,
+                    "prob": self._logprob_to_prob(v.logprob)
+                }
+                for tid, v in sorted(token_logprob_dict.items(), key=lambda x: x[1].rank)
+            ]
+            topk_token_probs_list.append(topk_tokens)
+
         logit_pairs = None
-        return prob_pairs, logit_pairs
+        return prob_pairs, logit_pairs, topk_token_probs_list
     
     def _logprob_to_prob(self, logprob):
         min_safe_input = torch.log(torch.tensor(torch.finfo(torch.float32).tiny))

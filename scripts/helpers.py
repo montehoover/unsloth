@@ -9,6 +9,12 @@ import matplotlib as mpl
 from matplotlib import pyplot as plt
 import pandas as pd
 import numpy as np
+import logging
+import numpy as np
+from transformers import AutoTokenizer
+import yaml
+from typing import List, Dict, Any
+from collections import defaultdict
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_recall_curve, confusion_matrix, roc_curve, precision_score, recall_score
 from constants import (
     COT_CLOSING,
@@ -39,10 +45,7 @@ from constants import (
     TRANSCRIPT_START,
     WILDGUARD_START_TAG,
 )
-import logging
-import numpy as np
-from transformers import AutoTokenizer
-import yaml
+
 logger = logging.getLogger(__name__)
 
 
@@ -268,7 +271,7 @@ def print_formatted_report(report, pos_token_id=None, neg_token_id=None):
         print(f"  Logit Bias Dict for Best F1: {json.dumps(bias_dict)}")
     else:
         print("  Logit Bias for Best F1: Not available when run with VLLM. Run with --no-use_vllm to get logit bias from huggingface outputs.")
-    print(f"  Optimal Probability Threshold: {best_f1_metrics['probability_threshold']:.2e}")
+    print(f"  Optimal Probability Threshold: {best_f1_metrics['probability_threshold']:.2e} (1 - {1 - best_f1_metrics['probability_threshold']:.2e})")
     print(f"  Best F1 Score: {best_f1_metrics['f1_score']:.2%}")
     print(f"  Recall at Best F1: {best_f1_metrics['recall']:.2%}")
     print(f"  FPR at Best F1: {best_f1_metrics['fpr']:.2%}")
@@ -282,7 +285,7 @@ def print_formatted_report(report, pos_token_id=None, neg_token_id=None):
             print(f"  Logit Bias Dict for Best F1: {json.dumps(bias_dict)}")
         else:
             print("  Logit Bias for Target FPR: Not available when run with VLLM. Run with --no-use_vllm to get logit bias from huggingface outputs.")
-        print(f"  Probability Threshold for Target FPR: {target_fpr_metrics['probability_threshold']:.2e}")
+        print(f"  Probability Threshold for Target FPR: {target_fpr_metrics['probability_threshold']:.2e} (1 - {1 - target_fpr_metrics['probability_threshold']:.2e})")
         print(f"  F1 Score at Target FPR: {target_fpr_metrics['f1_score']:.2%}")
         print(f"  Recall at Target FPR: {target_fpr_metrics['recall']:.2%}")
     else:
@@ -804,6 +807,61 @@ def get_token_bucket(num_tokens):
         return 16000
     else:
         return 32000
+
+
+def average_analysis_dicts(dicts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Average the values in specific accuracy fields across multiple analysis dictionaries.
+    
+    Args:
+        dicts: List of analysis dictionaries to average
+        
+    Returns:
+        A dictionary containing averaged values for the specified fields,
+        plus a field indicating how many dictionaries were averaged.
+    """
+    if not dicts:
+        raise ValueError("No dictionaries provided to average")
+    
+    # Fields to average
+    accuracy_fields = [
+        'num_turns_accuracy',
+        'num_rules_accuracy',
+        'failure_mode_accuracy',
+        'business_impact_accuracy',
+        'num_tokens_accuracy',
+        'num_counts_accuracy',
+        'num_hops_accuracy'
+    ]
+    
+    # Initialize result dictionary
+    result = {
+        'num_dicts_averaged': len(dicts)
+    }
+    
+    # Process each accuracy field
+    for field in accuracy_fields:
+        # Collect all values for each key across all dictionaries
+        key_values = defaultdict(list)
+        
+        for d in dicts:
+            if field in d and isinstance(d[field], dict):
+                for key, value in d[field].items():
+                    if isinstance(value, (int, float)):
+                        key_values[key].append(value)
+        
+        # Calculate averages for each key
+        averaged_field = {}
+        for key, values in key_values.items():
+            if values:  # Only average if we have values
+                averaged_field[key] = sum(values) / len(values)
+        
+        # Add the averaged field to result
+        if averaged_field:  # Only add if we have data
+            result[field] = averaged_field
+    
+    return result
+
 
 def get_analysis(dataset, wrong_predictions, strict=False):
     assert METADATA in dataset.column_names, f"Dataset {dataset} does not have {METADATA} field"
@@ -1345,3 +1403,37 @@ def format_user_agent_tags(transcript, user_tag="User:", agent_tag="Agent:"):
         transcript += "\n<end_of_turn>"
 
     return transcript
+
+
+def save_topk_chart(predictions, top_k=20, filename="topk_chart.png"):
+    """
+    Save a bar chart of the top-k next-token probabilities to disk.
+    
+    Args:
+        predictions (list of dict): Each dict must have keys "token", "token_id", and "prob".
+        top_k (int): Number of top predictions to display.
+        filename (str): Path to save the PNG file.
+    """
+    # Sort predictions by probability (descending) and take top-k
+    sorted_preds = sorted(predictions, key=lambda x: x['prob'], reverse=True)[:top_k]
+    
+    tokens = [p["token"] for p in sorted_preds]
+    probabilities = [p["prob"] for p in sorted_preds]
+    
+    # Plot
+    plt.figure(figsize=(10, 6))
+    bars = plt.bar(tokens, probabilities, color='skyblue', edgecolor='black')
+    plt.xticks(rotation=45, ha='right')
+    plt.ylabel("Probability")
+    plt.title(f"Top-{top_k} Next Token Probabilities")
+    plt.tight_layout()
+
+    # Annotate bars
+    for bar, prob in zip(bars, probabilities):
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2, height, f"{prob:.2%}", 
+                 ha='center', va='bottom', fontsize=8)
+    
+    # Save to file
+    plt.savefig(filename, dpi=300)
+    plt.close()
